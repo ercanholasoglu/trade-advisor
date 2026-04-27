@@ -5,3 +5,4 @@ duckduckgo-search>=6.0.0
 gradio>=5.0.0
 numpy
 pandas
+requests
