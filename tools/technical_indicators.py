@@ -1,21 +1,11 @@
 """Tool: Teknik analiz indikatörleri hesaplama."""
 
 from smolagents import tool
+from tools.cache import cache, TTL_TECHNICAL
 
 
-@tool
-def get_technical_indicators(ticker: str, period: str = "3mo") -> str:
-    """
-    Computes key technical indicators (RSI, MACD, Bollinger Bands, SMA, EMA, ATR, Stochastic)
-    for a given ticker. Use this to understand momentum, trend direction, and volatility.
-
-    Args:
-        ticker: Stock/crypto ticker symbol (e.g. 'AAPL', 'BTC-USD', 'NVDA')
-        period: Time period for historical data. Options: '1mo','3mo','6mo','1y'. Default '3mo'.
-
-    Returns:
-        JSON string with technical indicator values and their signal interpretations.
-    """
+@cache(ttl=TTL_TECHNICAL)
+def _fetch_technical_indicators(ticker: str, period: str) -> str:
     import yfinance as yf
     import pandas_ta as ta
     import json
@@ -23,7 +13,6 @@ def get_technical_indicators(ticker: str, period: str = "3mo") -> str:
     try:
         stock = yf.Ticker(ticker)
         df = stock.history(period=period, interval="1d")
-
         if df.empty or len(df) < 26:
             return json.dumps({"error": f"Insufficient data for {ticker} (need 26+ days)", "ticker": ticker})
 
@@ -48,8 +37,7 @@ def get_technical_indicators(ticker: str, period: str = "3mo") -> str:
                 if prev_hist < 0 and macd_hist > 0: macd_signal = "BULLISH_CROSSOVER"
                 elif prev_hist > 0 and macd_hist < 0: macd_signal = "BEARISH_CROSSOVER"
         else:
-            macd_val = macd_signal_val = macd_hist = None
-            macd_signal = "N/A"
+            macd_val = macd_signal_val = macd_hist = None; macd_signal = "N/A"
 
         bbands = ta.bbands(df["Close"], length=20, std=2)
         if bbands is not None and not bbands.empty:
@@ -63,8 +51,7 @@ def get_technical_indicators(ticker: str, period: str = "3mo") -> str:
             else: bb_signal = "BEARISH"
             bb_width = round((bb_upper - bb_lower) / bb_mid * 100, 2)
         else:
-            bb_upper = bb_mid = bb_lower = bb_width = None
-            bb_signal = "N/A"
+            bb_upper = bb_mid = bb_lower = bb_width = None; bb_signal = "N/A"
             current_price = round(float(df["Close"].iloc[-1]), 2)
 
         sma_20 = ta.sma(df["Close"], length=20)
@@ -89,14 +76,10 @@ def get_technical_indicators(ticker: str, period: str = "3mo") -> str:
 
         stoch = ta.stoch(df["High"], df["Low"], df["Close"], k=14, d=3, smooth_k=3)
         if stoch is not None and not stoch.empty:
-            stoch_k = round(float(stoch.iloc[-1, 0]), 2)
-            stoch_d = round(float(stoch.iloc[-1, 1]), 2)
-            if stoch_k > 80: stoch_signal = "OVERBOUGHT"
-            elif stoch_k < 20: stoch_signal = "OVERSOLD"
-            else: stoch_signal = "NEUTRAL"
+            stoch_k = round(float(stoch.iloc[-1, 0]), 2); stoch_d = round(float(stoch.iloc[-1, 1]), 2)
+            stoch_signal = "OVERBOUGHT" if stoch_k > 80 else ("OVERSOLD" if stoch_k < 20 else "NEUTRAL")
         else:
-            stoch_k = stoch_d = None
-            stoch_signal = "N/A"
+            stoch_k = stoch_d = None; stoch_signal = "N/A"
 
         signals = [rsi_signal, macd_signal, bb_signal, sma_signal, stoch_signal]
         bullish_count = sum(1 for s in signals if "BULLISH" in s or s == "OVERSOLD")
@@ -121,6 +104,21 @@ def get_technical_indicators(ticker: str, period: str = "3mo") -> str:
             },
         }
         return json.dumps(result, indent=2)
-
     except Exception as e:
         return json.dumps({"error": str(e), "ticker": ticker})
+
+
+@tool
+def get_technical_indicators(ticker: str, period: str = "3mo") -> str:
+    """
+    Computes key technical indicators (RSI, MACD, Bollinger Bands, SMA, EMA, ATR, Stochastic)
+    for a given ticker. Use this to understand momentum, trend direction, and volatility.
+
+    Args:
+        ticker: Stock/crypto ticker symbol (e.g. 'AAPL', 'BTC-USD', 'NVDA')
+        period: Time period for historical data. Options: '1mo','3mo','6mo','1y'. Default '3mo'.
+
+    Returns:
+        JSON string with technical indicator values and their signal interpretations.
+    """
+    return _fetch_technical_indicators(ticker, period)
