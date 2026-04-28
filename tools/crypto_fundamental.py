@@ -5,22 +5,12 @@ Market cap, volume, developer activity, community score, price changes.
 """
 
 from smolagents import tool
+from tools.cache import cache, TTL_CRYPTO
 
 
-@tool
-def get_crypto_fundamentals(crypto_id: str) -> str:
-    """
-    Fetches fundamental data for a cryptocurrency from CoinGecko free API.
-    Includes market cap, volume, developer activity, community scores, and price changes.
 
-    Args:
-        crypto_id: CoinGecko coin ID or ticker symbol (e.g. 'bitcoin', 'ethereum', 'solana', 'BTC', 'ETH').
-                   Common mappings: BTC→bitcoin, ETH→ethereum, SOL→solana, ADA→cardano, DOGE→dogecoin,
-                   XRP→ripple, DOT→polkadot, AVAX→avalanche-2, MATIC→matic-network, LINK→chainlink.
-
-    Returns:
-        JSON string with market data, developer activity, community scores, and fundamental signals.
-    """
+@cache(ttl=TTL_CRYPTO)
+def _cached_get_crypto_fundamentals(crypto_id: str) -> str:
     import json
     import requests
 
@@ -193,3 +183,20 @@ def get_crypto_fundamentals(crypto_id: str) -> str:
         return json.dumps({"error": "CoinGecko timeout — API may be slow", "crypto_id": coin_id})
     except Exception as e:
         return json.dumps({"error": str(e), "crypto_id": coin_id})
+
+
+@tool
+def get_crypto_fundamentals(crypto_id: str) -> str:
+    """
+    Fetches fundamental data for a cryptocurrency from CoinGecko free API.
+    Includes market cap, volume, developer activity, community scores, and price changes.
+
+    Args:
+        crypto_id: CoinGecko coin ID or ticker symbol (e.g. 'bitcoin', 'ethereum', 'solana', 'BTC', 'ETH').
+                   Common mappings: BTC→bitcoin, ETH→ethereum, SOL→solana, ADA→cardano, DOGE→dogecoin,
+                   XRP→ripple, DOT→polkadot, AVAX→avalanche-2, MATIC→matic-network, LINK→chainlink.
+
+    Returns:
+        JSON string with market data, developer activity, community scores, and fundamental signals.
+    """
+    return _cached_get_crypto_fundamentals(crypto_id)
