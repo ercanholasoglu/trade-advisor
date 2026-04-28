@@ -27,7 +27,6 @@ def get_price_history(ticker: str, period: str = "1mo", interval: str = "1d") ->
         if hist.empty:
             return json.dumps({"error": f"No data found for {ticker}", "ticker": ticker})
 
-        # Son 30 satırı al (çok uzun olmasın)
         hist = hist.tail(30)
 
         records = []
@@ -41,7 +40,6 @@ def get_price_history(ticker: str, period: str = "1mo", interval: str = "1d") ->
                 "volume": int(row["Volume"]),
             })
 
-        # Temel istatistikler
         closes = [r["close"] for r in records]
         current_price = closes[-1]
         price_change = current_price - closes[0]
