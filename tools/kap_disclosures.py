@@ -1,22 +1,12 @@
 """Tool: KAP (Kamuoyu Aydınlatma Platformu) entegrasyonu — v2."""
 
 from smolagents import tool
+from tools.cache import cache, TTL_KAP
 
 
-@tool
-def get_kap_disclosures(ticker: str) -> str:
-    """
-    Searches KAP (Kamuoyu Aydınlatma Platformu - Turkish Public Disclosure Platform)
-    for company information, recent disclosures, and financial reports.
-    Also fetches recent financial news about the company from web search.
-    Uses memberDisclosureQuery API for categorized disclosures with importance scoring.
 
-    Args:
-        ticker: BIST stock ticker (e.g. 'THYAO', 'GARAN', 'AKBNK'). No .IS suffix needed.
-
-    Returns:
-        JSON string with company info from KAP, categorized disclosures, importance scores, and news.
-    """
+@cache(ttl=TTL_KAP)
+def _cached_get_kap_disclosures(ticker: str) -> str:
     import json
     import requests
 
@@ -162,6 +152,23 @@ def get_kap_disclosures(ticker: str) -> str:
 
     return json.dumps(result, indent=2, ensure_ascii=False)
 
+
+
+@tool
+def get_kap_disclosures(ticker: str) -> str:
+    """
+    Searches KAP (Kamuoyu Aydınlatma Platformu - Turkish Public Disclosure Platform)
+    for company information, recent disclosures, and financial reports.
+    Also fetches recent financial news about the company from web search.
+    Uses memberDisclosureQuery API for categorized disclosures with importance scoring.
+
+    Args:
+        ticker: BIST stock ticker (e.g. 'THYAO', 'GARAN', 'AKBNK'). No .IS suffix needed.
+
+    Returns:
+        JSON string with company info from KAP, categorized disclosures, importance scores, and news.
+    """
+    return _cached_get_kap_disclosures(ticker)
 
 def _get_disclosure_importance(disc_type: str) -> int:
     """
