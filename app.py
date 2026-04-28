@@ -1,13 +1,11 @@
 """
-🤖 Trade Bot Advisor — Gradio UI v2.0
+🤖 Trade Bot Advisor — Gradio UI v3.0
 ========================================
-Full-featured UI with 10 tabs:
-1. Dashboard, 2. Quick Analysis, 3. Compare, 4. Backtest,
-5. Portfolio Optimizer, 6. Watchlist, 7. Analysis History,
-8. Telegram, 9. Chat, 10. Guide
-
-Gradio queue enabled for concurrent request handling.
-Tool calls run in thread pool to avoid blocking the server.
+Architecture:
+  Signal generation → deterministic (core/strategy.py)
+  LLM council → analysis + explanation only (never generates signals)
+  Paper trading → virtual portfolio with risk limits (core/safety.py)
+  Fallback data → Space always works even when APIs are down
 """
 
 import os, json, time, datetime
@@ -28,6 +26,10 @@ from tools.insider_trades import get_insider_trades
 from tools.options_flow import get_options_flow
 from tools.macro_data import get_macro_data
 from tools.sector_correlation import get_sector_correlation
+from core.strategy import generate_signal
+from core.safety import get_paper_portfolio, reset_paper_portfolio
+from core.monitoring import setup_logging, get_health
+from core.data_ingest import get_fallback
 from output_schema import parse_trade_report, report_to_markdown
 from db import (
     init_db, save_analysis, get_accuracy_stats, get_recent_analyses,
@@ -36,6 +38,9 @@ from db import (
 
 # Initialize database
 init_db()
+
+# Structured logging
+setup_logging(os.environ.get("LOG_LEVEL", "INFO"))
 
 # Start scheduler (if APScheduler available)
 _scheduler = None
@@ -530,6 +535,109 @@ def run_closing_report_now():
 
 
 # ============================================================
+# PAPER TRADING
+# ============================================================
+def run_paper_signal(ticker, portfolio_value, risk_tolerance):
+    if not ticker or not ticker.strip():
+        return "❌ Ticker girin"
+    try:
+        signal = generate_signal(ticker.strip().upper(), portfolio_value, risk_tolerance.lower())
+        return _format_signal_markdown(signal)
+    except Exception as e:
+        return f"❌ Sinyal hatası: {e}"
+
+
+def execute_paper_trade(ticker, portfolio_value, risk_tolerance):
+    if not ticker or not ticker.strip():
+        return "❌ Ticker girin", get_paper_summary()
+    try:
+        signal = generate_signal(ticker.strip().upper(), portfolio_value, risk_tolerance.lower())
+        pp = get_paper_portfolio(portfolio_value)
+        if signal["signal"] in ("BUY", "STRONG_BUY") and signal.get("shares", 0) > 0:
+            result = pp.open_position(signal["ticker"], signal["shares"], signal["entry_price"],
+                stop_loss=signal.get("stop_loss"), take_profit=signal.get("take_profit"), signal=signal["signal"])
+            md = _format_signal_markdown(signal)
+            md += f"\n\n### 📋 Paper Trade\n**Durum:** {result['status']}\n"
+            if result["status"] == "OPENED":
+                md += f"**Maliyet:** ${result['cost']:,.2f} | **Kalan nakit:** ${result['remaining_cash']:,.2f}\n"
+            elif result.get("violations"):
+                for v in result["violations"]:
+                    md += f"- ⚠️ {v}\n"
+            return md, get_paper_summary()
+        else:
+            md = _format_signal_markdown(signal)
+            md += f"\n\n📋 Sinyal {signal['signal']} — paper trade açılmadı."
+            return md, get_paper_summary()
+    except Exception as e:
+        return f"❌ {e}", get_paper_summary()
+
+
+def get_paper_summary():
+    try:
+        pp = get_paper_portfolio()
+        s = pp.get_summary()
+        pnl_e = "🟢" if s['total_pnl'] >= 0 else "🔴"
+        md = f"## 💼 Paper Portföy\n\n**Nakit:** ${s['cash']:,.2f} | **Özkaynak:** ${s['equity']:,.2f} | **P&L:** {pnl_e} ${s['total_pnl']:+,.2f} ({s['total_pnl_pct']:+.1f}%)\n\n"
+        if s['positions']:
+            md += "| Ticker | Adet | Giriş | P&L | SL | TP |\n|---|---|---|---|---|---|\n"
+            for p in s['positions']:
+                pe = "🟢" if p['pnl_pct'] >= 0 else "🔴"
+                md += f"| **{p['ticker']}** | {p['shares']} | ${p['entry_price']:.2f} | {pe} {p['pnl_pct']:+.1f}% | {p.get('stop_loss', '-')} | {p.get('take_profit', '-')} |\n"
+        else:
+            md += "*Açık pozisyon yok.*\n"
+        if s['closed_trades'] > 0:
+            md += f"\n**Kapatılan:** {s['closed_trades']} | **Win rate:** {s['win_rate']}%\n"
+        return md
+    except Exception:
+        return "📋 Paper portföy henüz başlatılmadı."
+
+
+def reset_paper():
+    reset_paper_portfolio(100000)
+    return "✅ Paper portföy sıfırlandı ($100,000)", get_paper_summary()
+
+
+def _format_signal_markdown(sig):
+    s = sig.get("signal", "HOLD")
+    emoji = {"STRONG_BUY": "🟢🟢", "BUY": "🟢", "HOLD": "🟡", "SELL": "🔴", "STRONG_SELL": "🔴🔴"}.get(s, "🟡")
+    return f"""## {emoji} {sig.get('ticker', '?')} — {s}
+
+**Güven:** {sig.get('confidence', 0)}% | **Yöntem:** Kural tabanlı indikatör oyu (LLM değil)
+
+| İndikatör | Değer | Sinyal |
+|---|---|---|
+| RSI(14) | {sig.get('rsi', 'N/A')} | {sig.get('rsi_signal', 'N/A')} |
+| MACD | {sig.get('macd', 'N/A')} | {sig.get('macd_trend', 'N/A')} |
+| SMA(20/50) | — | {sig.get('sma_signal', 'N/A')} |
+| Bollinger | — | {sig.get('bb_signal', 'N/A')} |
+| Volatilite | — | {sig.get('volatility_regime', 'N/A')} |
+
+**Oy:** {sig.get('bullish_count', 0)} bullish / {sig.get('bearish_count', 0)} bearish
+
+| | |
+|---|---|
+| Giriş | ${sig.get('entry_price', 0):,.2f} |
+| SL | ${sig.get('stop_loss') or 0:,.2f} |
+| TP | ${sig.get('take_profit') or 0:,.2f} |
+| Hisse | {sig.get('shares', 0)} |
+| R/R | {sig.get('risk_reward', 'N/A')} |
+
+⚠️ *Deterministic sinyal — LLM analizi ayrıdır. Yatırım tavsiyesi değildir.*
+"""
+
+
+def run_health_check():
+    health = get_health()
+    st = "🟢" if health["status"] == "healthy" else "🟡"
+    md = f"## 🏥 Sistem Sağlığı — {st} {health['status']}\n\n| Bileşen | Durum |\n|---|---|\n"
+    for name, comp in health.get("components", {}).items():
+        cs = comp.get("status", "?")
+        ce = "🟢" if cs in ("up", "configured", "available") else ("🟡" if cs == "degraded" else "🔴")
+        md += f"| {name} | {ce} {cs} |\n"
+    return md
+
+
+# ============================================================
 # TAB: SOHBET
 # ============================================================
 def chat_analysis(message, history):
@@ -699,6 +807,31 @@ Raporlar aktif bildirim kanallarına gönderilir (Telegram/Discord/WhatsApp).
             hist_btn.click(fn=get_history_display, inputs=[hist_ticker], outputs=hist_out)
 
         # TAB 8: Telegram
+        # TAB: Paper Trading
+        with gr.Tab("📝 Paper Trade"):
+            gr.Markdown("### Paper Trading — Sanal Portföy ile Risk-Free Test\nSinyal **LLM değil**, kural tabanlı indikatör oylaması ile üretilir.")
+            with gr.Row():
+                with gr.Column(scale=1):
+                    pt_ticker = gr.Textbox(label="📌 Ticker", value="AAPL")
+                    pt_pv = gr.Number(label="💰 Portföy ($)", value=100000, minimum=1000)
+                    pt_rt = gr.Radio(label="⚖️ Risk", choices=["Conservative", "Moderate", "Aggressive"], value="Moderate")
+                    pt_signal_btn = gr.Button("📊 Sinyal Üret (Sadece Bak)", variant="secondary")
+                    pt_trade_btn = gr.Button("📝 Sinyal + Paper Trade Aç", variant="primary", size="lg")
+                    pt_reset_btn = gr.Button("🗑️ Portföyü Sıfırla", variant="stop")
+                with gr.Column(scale=2):
+                    pt_signal_out = gr.Markdown(value="*Ticker girin ve sinyal üretin…*")
+                    pt_portfolio_out = gr.Markdown(value=get_paper_summary())
+            pt_signal_btn.click(fn=run_paper_signal, inputs=[pt_ticker, pt_pv, pt_rt], outputs=pt_signal_out)
+            pt_trade_btn.click(fn=execute_paper_trade, inputs=[pt_ticker, pt_pv, pt_rt], outputs=[pt_signal_out, pt_portfolio_out])
+            pt_reset_btn.click(fn=reset_paper, outputs=[pt_signal_out, pt_portfolio_out])
+
+        # TAB: Health
+        with gr.Tab("🏥 Sistem"):
+            gr.Markdown("### Sistem Sağlığı ve Bileşen Durumu")
+            health_btn = gr.Button("🏥 Kontrol Et", variant="primary")
+            health_out = gr.Markdown(value="*Butona tıklayın…*")
+            health_btn.click(fn=run_health_check, outputs=health_out)
+
         with gr.Tab("🔔 Telegram"):
             gr.Markdown("### Analiz → Telegram\n@BotFather → /newbot → Token, bota mesaj → getUpdates → chat_id")
             with gr.Row():
@@ -719,6 +852,7 @@ Raporlar aktif bildirim kanallarına gönderilir (Telegram/Discord/WhatsApp).
             gr.ChatInterface(
                 fn=chat_analysis,
                 type="messages",
+                
                 examples=[
                     "THYAO hissesini analiz et, portföyüm 500K TL, orta risk",
                     "Bugün BIST'te hangi hisseleri almalıyım?",
