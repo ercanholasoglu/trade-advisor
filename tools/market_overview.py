@@ -1,19 +1,12 @@
 """Tool: Genel piyasa durumu - major endeksler, sektörler, VIX."""
 
 from smolagents import tool
+from tools.cache import cache, TTL_MARKET
 
 
-@tool
-def get_market_overview() -> str:
-    """
-    Provides a comprehensive overview of current market conditions.
-    Includes major indices (S&P 500, NASDAQ, DOW), VIX fear index, sector performance,
-    key commodities (Gold, Oil), crypto (Bitcoin), and bond yields (10Y Treasury).
 
-    Returns:
-        JSON string with market indices, sector performance, commodities,
-        crypto, bond yields, and overall market regime assessment.
-    """
+@cache(ttl=TTL_MARKET)
+def _cached_get_market_overview() -> str:
     import yfinance as yf
     import json
 
@@ -81,3 +74,17 @@ def get_market_overview() -> str:
 
     except Exception as e:
         return json.dumps({"error": str(e)})
+
+
+@tool
+def get_market_overview() -> str:
+    """
+    Provides a comprehensive overview of current market conditions.
+    Includes major indices (S&P 500, NASDAQ, DOW), VIX fear index, sector performance,
+    key commodities (Gold, Oil), crypto (Bitcoin), and bond yields (10Y Treasury).
+
+    Returns:
+        JSON string with market indices, sector performance, commodities,
+        crypto, bond yields, and overall market regime assessment.
+    """
+    return _cached_get_market_overview()
