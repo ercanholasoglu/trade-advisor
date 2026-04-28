@@ -6,21 +6,12 @@ Detects large insider buys (strong bullish signal) and sells.
 """
 
 from smolagents import tool
+from tools.cache import cache, TTL_INSIDER
 
 
-@tool
-def get_insider_trades(ticker: str, days: int = 60) -> str:
-    """
-    Fetches recent SEC EDGAR Form 4 insider trading filings for a US stock.
-    Large insider purchases (>$500K) are a strong bullish signal.
 
-    Args:
-        ticker: US stock ticker symbol (e.g. 'AAPL', 'NVDA', 'TSLA'). BIST stocks not supported.
-        days: Number of days to look back. Default 60.
-
-    Returns:
-        JSON string with insider transactions, buy/sell summary, and signals.
-    """
+@cache(ttl=TTL_INSIDER)
+def _cached_get_insider_trades(ticker: str, days: int = 60) -> str:
     import json
     import requests
     from datetime import datetime, timedelta
@@ -135,3 +126,19 @@ def get_insider_trades(ticker: str, days: int = 60) -> str:
         return json.dumps({"error": "SEC EDGAR timeout", "ticker": ticker})
     except Exception as e:
         return json.dumps({"error": str(e), "ticker": ticker})
+
+
+@tool
+def get_insider_trades(ticker: str, days: int = 60) -> str:
+    """
+    Fetches recent SEC EDGAR Form 4 insider trading filings for a US stock.
+    Large insider purchases (>$500K) are a strong bullish signal.
+
+    Args:
+        ticker: US stock ticker symbol (e.g. 'AAPL', 'NVDA', 'TSLA'). BIST stocks not supported.
+        days: Number of days to look back. Default 60.
+
+    Returns:
+        JSON string with insider transactions, buy/sell summary, and signals.
+    """
+    return _cached_get_insider_trades(ticker, days)
