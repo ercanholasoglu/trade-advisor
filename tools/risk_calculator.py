@@ -1,23 +1,12 @@
 """Tool: Risk hesaplama - VaR, position sizing, stop-loss."""
 
 from smolagents import tool
+from tools.cache import cache, TTL_RISK
 
 
-@tool
-def calculate_risk_metrics(ticker: str, portfolio_value: float, risk_tolerance: str = "moderate") -> str:
-    """
-    Calculates risk metrics and position sizing for a potential trade.
-    Computes Value at Risk (VaR), optimal position size, suggested stop-loss
-    and take-profit levels based on historical volatility and risk tolerance.
 
-    Args:
-        ticker: Stock/crypto ticker symbol (e.g. 'AAPL', 'BTC-USD')
-        portfolio_value: Total portfolio value in USD (e.g. 100000.0)
-        risk_tolerance: Risk profile - 'conservative', 'moderate', or 'aggressive'. Default 'moderate'.
-
-    Returns:
-        JSON string with risk metrics, position sizing, stop-loss/take-profit levels.
-    """
+@cache(ttl=TTL_RISK)
+def _cached_calculate_risk_metrics(ticker: str, portfolio_value: float, risk_tolerance: str = "moderate") -> str:
     import yfinance as yf
     import json
     import numpy as np
@@ -105,3 +94,21 @@ def calculate_risk_metrics(ticker: str, portfolio_value: float, risk_tolerance: 
 
     except Exception as e:
         return json.dumps({"error": str(e), "ticker": ticker})
+
+
+@tool
+def calculate_risk_metrics(ticker: str, portfolio_value: float, risk_tolerance: str = "moderate") -> str:
+    """
+    Calculates risk metrics and position sizing for a potential trade.
+    Computes Value at Risk (VaR), optimal position size, suggested stop-loss
+    and take-profit levels based on historical volatility and risk tolerance.
+
+    Args:
+        ticker: Stock/crypto ticker symbol (e.g. 'AAPL', 'BTC-USD')
+        portfolio_value: Total portfolio value in USD (e.g. 100000.0)
+        risk_tolerance: Risk profile - 'conservative', 'moderate', or 'aggressive'. Default 'moderate'.
+
+    Returns:
+        JSON string with risk metrics, position sizing, stop-loss/take-profit levels.
+    """
+    return _cached_calculate_risk_metrics(ticker, portfolio_value, risk_tolerance)
