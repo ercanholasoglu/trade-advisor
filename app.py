@@ -654,6 +654,7 @@ with gr.Blocks(title="🤖 Trade Bot Advisor v2.0") as demo:
             gr.Markdown("Doğal dilde soru sorun — Türkçe veya İngilizce.")
             gr.ChatInterface(
                 fn=chat_analysis,
+                type="messages",
                 examples=[
                     "THYAO hissesini analiz et, portföyüm 500K TL, orta risk",
                     "Bugün BIST'te hangi hisseleri almalıyım?",
@@ -730,5 +731,4 @@ if __name__ == "__main__":
     demo.queue(max_size=10).launch(
         server_name="0.0.0.0",
         server_port=7860,
-        theme=gr.themes.Soft(primary_hue="blue", secondary_hue="gray"),
     )
