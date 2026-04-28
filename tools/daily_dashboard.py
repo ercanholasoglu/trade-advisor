@@ -45,8 +45,10 @@ def _cached_get_daily_dashboard(market: str = "both", portfolio_value: float = 1
 
     bist_stocks, us_stocks = [], []
     if market in ("bist", "both"):
-        BIST30 = {"THYAO":"THY","GARAN":"Garanti","AKBNK":"Akbank","SISE":"Şişecam","EREGL":"Ereğli","BIMAS":"BİM","TUPRS":"Tüpraş","SAHOL":"Sabancı","KCHOL":"Koç","ASELS":"Aselsan","FROTO":"Ford Otosan","PGSUS":"Pegasus","TCELL":"Turkcell","TOASO":"Tofaş","PETKM":"Petkim","YKBNK":"Yapı Kredi","HALKB":"Halkbank","VAKBN":"Vakıfbank","KOZAL":"Koza Altın","ARCLK":"Arçelik","TTKOM":"Türk Telekom","MGROS":"Migros","TAVHL":"TAV","ENKAI":"Enka"}
-        bist_stocks = _scan_stocks(BIST30, suffix=".IS")
+        # Use expanded BIST universe from bist_scanner
+        from tools.bist_scanner import BIST_ALL
+        BIST_DASHBOARD = {k.replace(".IS", ""): v for k, v in BIST_ALL.items()}
+        bist_stocks = _scan_stocks(BIST_DASHBOARD, suffix=".IS")
         try:
             xu = yf.Ticker("XU100.IS").history(period="5d")
             if not xu.empty and len(xu) >= 2:
