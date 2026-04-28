@@ -6,3 +6,8 @@ gradio>=5.0.0
 numpy
 pandas
 requests
+pydantic>=2.0.0
+scipy>=1.10.0
+apscheduler>=3.10.0
+pytest>=7.0.0
+responses>=0.23.0
