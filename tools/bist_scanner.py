@@ -16,8 +16,7 @@ def get_bist_scanner(scan_type: str = "bist30") -> str:
                    'indices' (BIST indices). Default 'bist30'.
 
     Returns:
-        JSON string with scanned stocks, prices in TRY, daily changes, RSI signals,
-        and sector overview.
+        JSON string with scanned stocks, prices in TRY, daily changes, RSI signals.
     """
     import yfinance as yf
     import json
@@ -49,10 +48,8 @@ def get_bist_scanner(scan_type: str = "bist30") -> str:
             },
         }
 
-        if scan_type == "commodities_try":
-            return _get_commodities_try()
-        if scan_type == "indices":
-            return _get_bist_indices()
+        if scan_type == "commodities_try": return _get_commodities_try()
+        if scan_type == "indices": return _get_bist_indices()
 
         tickers = TICKER_GROUPS.get(scan_type, TICKER_GROUPS["bist30"])
         stocks, buy_signals, sell_signals = [], [], []
