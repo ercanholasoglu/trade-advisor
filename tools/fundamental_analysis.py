@@ -1,21 +1,12 @@
 """Tool: Temel analiz - finansal tablolar, oranlar, earnings."""
 
 from smolagents import tool
+from tools.cache import cache, TTL_FUNDAMENTAL
 
 
-@tool
-def get_fundamental_data(ticker: str) -> str:
-    """
-    Fetches fundamental financial data for a stock: valuation ratios, financials,
-    earnings, dividends, and company profile. Essential for evaluating intrinsic value.
 
-    Args:
-        ticker: Stock ticker symbol (e.g. 'AAPL', 'MSFT', 'GOOGL'). Crypto tickers not supported.
-
-    Returns:
-        JSON string with company profile, valuation metrics (P/E, P/B, etc.),
-        financial highlights, and analyst recommendations.
-    """
+@cache(ttl=TTL_FUNDAMENTAL)
+def _cached_get_fundamental_data(ticker: str) -> str:
     import yfinance as yf
     import json
 
@@ -104,3 +95,19 @@ def get_fundamental_data(ticker: str) -> str:
 
     except Exception as e:
         return json.dumps({"error": str(e), "ticker": ticker})
+
+
+@tool
+def get_fundamental_data(ticker: str) -> str:
+    """
+    Fetches fundamental financial data for a stock: valuation ratios, financials,
+    earnings, dividends, and company profile. Essential for evaluating intrinsic value.
+
+    Args:
+        ticker: Stock ticker symbol (e.g. 'AAPL', 'MSFT', 'GOOGL'). Crypto tickers not supported.
+
+    Returns:
+        JSON string with company profile, valuation metrics (P/E, P/B, etc.),
+        financial highlights, and analyst recommendations.
+    """
+    return _cached_get_fundamental_data(ticker)
