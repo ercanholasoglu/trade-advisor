@@ -1,22 +1,12 @@
 """Tool: Günlük Dashboard — Al/Sat önerileri, performans takibi, piyasa özeti."""
 
 from smolagents import tool
+from tools.cache import cache, TTL_BIST
 
 
-@tool
-def get_daily_dashboard(market: str = "both", portfolio_value: float = 100000.0) -> str:
-    """
-    Generates a comprehensive daily trading dashboard with buy/sell recommendations,
-    market overview, top movers, and commodity prices. Covers both BIST and US markets.
 
-    Args:
-        market: Which market to scan. Options: 'bist' (Borsa Istanbul only), 'us' (US/NASDAQ only), 'both' (default).
-        portfolio_value: Portfolio size in USD for position sizing context. Default 100000.
-
-    Returns:
-        JSON string with daily dashboard including buy signals, sell signals,
-        top gainers/losers, market regime, commodities, and summary.
-    """
+@cache(ttl=TTL_BIST)
+def _cached_get_daily_dashboard(market: str = "both", portfolio_value: float = 100000.0) -> str:
     import yfinance as yf
     import json
     import datetime
@@ -101,3 +91,20 @@ def get_daily_dashboard(market: str = "both", portfolio_value: float = 100000.0)
     n_buy, n_sell = len(dashboard["buy_recommendations"]), len(dashboard["sell_recommendations"])
     dashboard["summary"] = f"Günlük Tarama: {len(all_stocks)} hisse. 📈 {n_buy} AL, 📉 {n_sell} SAT. Altın: ₺{dashboard['commodities_try'].get('gold_try_gram','?')}/gram, USD/TRY: {dashboard['commodities_try'].get('usd_try','?')}"
     return json.dumps(dashboard, indent=2, ensure_ascii=False)
+
+
+@tool
+def get_daily_dashboard(market: str = "both", portfolio_value: float = 100000.0) -> str:
+    """
+    Generates a comprehensive daily trading dashboard with buy/sell recommendations,
+    market overview, top movers, and commodity prices. Covers both BIST and US markets.
+
+    Args:
+        market: Which market to scan. Options: 'bist' (Borsa Istanbul only), 'us' (US/NASDAQ only), 'both' (default).
+        portfolio_value: Portfolio size in USD for position sizing context. Default 100000.
+
+    Returns:
+        JSON string with daily dashboard including buy signals, sell signals,
+        top gainers/losers, market regime, commodities, and summary.
+    """
+    return _cached_get_daily_dashboard(market, portfolio_value)
