@@ -1,4 +1,4 @@
-"""Tool: Haber ve sentiment analizi (DuckDuckGo + basit sentiment)."""
+"""Tool: Haber ve sentiment analizi — FinBERT + keyword fallback."""
 
 from smolagents import tool
 
@@ -7,7 +7,8 @@ from smolagents import tool
 def get_news_sentiment(ticker: str, company_name: str = "") -> str:
     """
     Searches for recent financial news about a ticker/company and analyzes sentiment.
-    Uses web search to find latest news and provides sentiment scoring.
+    Uses FinBERT (ProsusAI/finbert) via HF Inference API for accurate NLP sentiment.
+    Falls back to keyword-based sentiment if FinBERT is unavailable.
 
     Args:
         ticker: Stock ticker symbol (e.g. 'AAPL', 'NVDA', 'TSLA')
@@ -17,6 +18,7 @@ def get_news_sentiment(ticker: str, company_name: str = "") -> str:
         JSON string with news articles, individual sentiment scores, and overall sentiment summary.
     """
     import json
+    import os
 
     try:
         from duckduckgo_search import DDGS
@@ -33,19 +35,25 @@ def get_news_sentiment(ticker: str, company_name: str = "") -> str:
                 "news_count": 0,
             })
 
-        # Basit keyword-based sentiment (FinBERT yerine lightweight)
-        positive_words = {
-            "surge", "soar", "jump", "gain", "rally", "rise", "bull", "bullish",
-            "record", "high", "growth", "profit", "beat", "exceed", "upgrade",
-            "buy", "outperform", "strong", "positive", "boom", "breakout",
-            "optimistic", "upbeat", "recovery", "innovation", "expand",
-        }
-        negative_words = {
-            "drop", "fall", "crash", "plunge", "decline", "loss", "bear", "bearish",
-            "low", "weak", "miss", "downgrade", "sell", "underperform", "risk",
-            "fear", "concern", "warning", "cut", "layoff", "recession", "debt",
-            "slump", "volatile", "uncertainty", "lawsuit", "investigation",
-        }
+        # Try FinBERT via HF Inference API
+        finbert_available = False
+        hf_token = os.environ.get("HF_TOKEN", "")
+
+        if hf_token:
+            try:
+                import requests
+                finbert_url = "https://api-inference.huggingface.co/models/ProsusAI/finbert"
+                # Test with first headline
+                test_resp = requests.post(
+                    finbert_url,
+                    headers={"Authorization": f"Bearer {hf_token}"},
+                    json={"inputs": results[0].get("title", "test")},
+                    timeout=10,
+                )
+                if test_resp.ok and isinstance(test_resp.json(), list):
+                    finbert_available = True
+            except Exception:
+                pass
 
         articles = []
         sentiment_scores = []
@@ -53,20 +61,12 @@ def get_news_sentiment(ticker: str, company_name: str = "") -> str:
         for r in results:
             title = r.get("title", "")
             body = r.get("body", "")
-            text = (title + " " + body).lower()
+            text_for_sentiment = title[:512]  # FinBERT has token limit
 
-            pos_count = sum(1 for w in positive_words if w in text)
-            neg_count = sum(1 for w in negative_words if w in text)
-
-            if pos_count > neg_count:
-                sentiment = "POSITIVE"
-                score = min(1.0, pos_count * 0.2)
-            elif neg_count > pos_count:
-                sentiment = "NEGATIVE"
-                score = max(-1.0, -neg_count * 0.2)
+            if finbert_available:
+                sentiment, score = _finbert_sentiment(text_for_sentiment, hf_token)
             else:
-                sentiment = "NEUTRAL"
-                score = 0.0
+                sentiment, score = _keyword_sentiment(title + " " + body)
 
             sentiment_scores.append(score)
 
@@ -96,6 +96,7 @@ def get_news_sentiment(ticker: str, company_name: str = "") -> str:
         result = {
             "ticker": ticker.upper(),
             "news_count": len(articles),
+            "sentiment_method": "FinBERT" if finbert_available else "keyword",
             "overall_sentiment": overall_sentiment,
             "avg_sentiment_score": round(avg_score, 3),
             "sentiment_breakdown": {
@@ -109,3 +110,66 @@ def get_news_sentiment(ticker: str, company_name: str = "") -> str:
 
     except Exception as e:
         return json.dumps({"error": str(e), "ticker": ticker})
+
+
+def _finbert_sentiment(text: str, hf_token: str) -> tuple[str, float]:
+    """Get sentiment from FinBERT via HF Inference API."""
+    import requests
+
+    try:
+        resp = requests.post(
+            "https://api-inference.huggingface.co/models/ProsusAI/finbert",
+            headers={"Authorization": f"Bearer {hf_token}"},
+            json={"inputs": text},
+            timeout=15,
+        )
+        if resp.ok:
+            results = resp.json()
+            if isinstance(results, list) and len(results) > 0:
+                # Results is [[{"label": "positive", "score": 0.94}, ...]]
+                if isinstance(results[0], list):
+                    results = results[0]
+
+                # Find best label
+                best = max(results, key=lambda x: x.get("score", 0))
+                label = best.get("label", "neutral").lower()
+                confidence = best.get("score", 0.5)
+
+                if label == "positive":
+                    return "POSITIVE", confidence
+                elif label == "negative":
+                    return "NEGATIVE", -confidence
+                else:
+                    return "NEUTRAL", 0.0
+    except Exception:
+        pass
+
+    # Fallback to keyword if FinBERT fails for this specific text
+    return _keyword_sentiment(text)
+
+
+def _keyword_sentiment(text: str) -> tuple[str, float]:
+    """Fallback keyword-based sentiment analysis."""
+    positive_words = {
+        "surge", "soar", "jump", "gain", "rally", "rise", "bull", "bullish",
+        "record", "high", "growth", "profit", "beat", "exceed", "upgrade",
+        "buy", "outperform", "strong", "positive", "boom", "breakout",
+        "optimistic", "upbeat", "recovery", "innovation", "expand",
+    }
+    negative_words = {
+        "drop", "fall", "crash", "plunge", "decline", "loss", "bear", "bearish",
+        "low", "weak", "miss", "downgrade", "sell", "underperform", "risk",
+        "fear", "concern", "warning", "cut", "layoff", "recession", "debt",
+        "slump", "volatile", "uncertainty", "lawsuit", "investigation",
+    }
+
+    text_lower = text.lower()
+    pos_count = sum(1 for w in positive_words if w in text_lower)
+    neg_count = sum(1 for w in negative_words if w in text_lower)
+
+    if pos_count > neg_count:
+        return "POSITIVE", min(1.0, pos_count * 0.2)
+    elif neg_count > pos_count:
+        return "NEGATIVE", max(-1.0, -neg_count * 0.2)
+    else:
+        return "NEUTRAL", 0.0
