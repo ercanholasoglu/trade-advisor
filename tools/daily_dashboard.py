@@ -15,7 +15,7 @@ def get_daily_dashboard(market: str = "both", portfolio_value: float = 100000.0)
 
     Returns:
         JSON string with daily dashboard including buy signals, sell signals,
-        top gainers/losers, market regime, commodities, and summary recommendations.
+        top gainers/losers, market regime, commodities, and summary.
     """
     import yfinance as yf
     import json
