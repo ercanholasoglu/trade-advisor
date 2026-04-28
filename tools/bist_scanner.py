@@ -1,23 +1,12 @@
 """Tool: BIST (Borsa İstanbul) hisse taraması + Türk piyasa genel durumu."""
 
 from smolagents import tool
+from tools.cache import cache, TTL_BIST
 
 
-@tool
-def get_bist_scanner(scan_type: str = "bist30") -> str:
-    """
-    Scans BIST (Borsa Istanbul) stocks and returns current prices, daily changes,
-    technical signals (RSI), and market overview. Also provides gold, silver prices
-    in TRY and USD/TRY exchange rate.
 
-    Args:
-        scan_type: Type of scan. Options: 'bist30' (top 30 stocks), 'bist_banks' (banking sector),
-                   'bist_tech' (technology), 'commodities_try' (gold/silver/forex in TRY),
-                   'indices' (BIST indices). Default 'bist30'.
-
-    Returns:
-        JSON string with scanned stocks, prices in TRY, daily changes, RSI signals.
-    """
+@cache(ttl=TTL_BIST)
+def _cached_get_bist_scanner(scan_type: str = "bist30") -> str:
     import yfinance as yf
     import json
 
@@ -82,6 +71,24 @@ def get_bist_scanner(scan_type: str = "bist30") -> str:
     except Exception as e:
         return json.dumps({"error": str(e)})
 
+
+
+@tool
+def get_bist_scanner(scan_type: str = "bist30") -> str:
+    """
+    Scans BIST (Borsa Istanbul) stocks and returns current prices, daily changes,
+    technical signals (RSI), and market overview. Also provides gold, silver prices
+    in TRY and USD/TRY exchange rate.
+
+    Args:
+        scan_type: Type of scan. Options: 'bist30' (top 30 stocks), 'bist_banks' (banking sector),
+                   'bist_tech' (technology), 'commodities_try' (gold/silver/forex in TRY),
+                   'indices' (BIST indices). Default 'bist30'.
+
+    Returns:
+        JSON string with scanned stocks, prices in TRY, daily changes, RSI signals.
+    """
+    return _cached_get_bist_scanner(scan_type)
 
 def _get_commodities_try():
     import yfinance as yf
