@@ -7,21 +7,12 @@ and upcoming macro events.
 """
 
 from smolagents import tool
+from tools.cache import cache, TTL_MACRO
 
 
-@tool
-def get_macro_data(region: str = "both") -> str:
-    """
-    Fetches macroeconomic data: TCMB interest rates, inflation, USD/TRY for Turkey;
-    Fed funds rate, CPI, unemployment, GDP for US. Determines macro regime
-    (TIGHTENING/EASING/NEUTRAL) and risk factor for each region.
 
-    Args:
-        region: Which region's macro data. Options: 'turkey', 'us', 'both' (default).
-
-    Returns:
-        JSON string with macro indicators, regime assessment, risk factors, and upcoming catalysts.
-    """
+@cache(ttl=TTL_MACRO)
+def _cached_get_macro_data(region: str = "both") -> str:
     import json
     import requests
     import yfinance as yf
@@ -208,3 +199,19 @@ def get_macro_data(region: str = "both") -> str:
     ]
 
     return json.dumps(result, indent=2, ensure_ascii=False)
+
+
+@tool
+def get_macro_data(region: str = "both") -> str:
+    """
+    Fetches macroeconomic data: TCMB interest rates, inflation, USD/TRY for Turkey;
+    Fed funds rate, CPI, unemployment, GDP for US. Determines macro regime
+    (TIGHTENING/EASING/NEUTRAL) and risk factor for each region.
+
+    Args:
+        region: Which region's macro data. Options: 'turkey', 'us', 'both' (default).
+
+    Returns:
+        JSON string with macro indicators, regime assessment, risk factors, and upcoming catalysts.
+    """
+    return _cached_get_macro_data(region)
