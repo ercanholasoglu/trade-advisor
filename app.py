@@ -27,6 +27,7 @@ from tools.crypto_fundamental import get_crypto_fundamentals
 from tools.insider_trades import get_insider_trades
 from tools.options_flow import get_options_flow
 from tools.macro_data import get_macro_data
+from tools.sector_correlation import get_sector_correlation
 from output_schema import parse_trade_report, report_to_markdown
 from db import (
     init_db, save_analysis, get_accuracy_stats, get_recent_analyses,
@@ -496,7 +497,40 @@ def send_telegram_alert(bt, ci, t, pv, rt):
 
 
 # ============================================================
-# TAB 9: SOHBET
+# TAB: SEKTÖR KORELASYON
+# ============================================================
+def run_sector_correlation(period):
+    try:
+        from tools.sector_correlation import get_sector_correlation, format_correlation_markdown
+        result_json = get_sector_correlation(period=period)
+        return format_correlation_markdown(result_json)
+    except Exception as e:
+        return f"❌ Korelasyon hatası: {e}"
+
+
+# ============================================================
+# TAB: ZAMANLI RAPORLAR
+# ============================================================
+def run_morning_report_now():
+    try:
+        from scheduler import generate_morning_report
+        msg = generate_morning_report()
+        return f"✅ Sabah raporu oluşturuldu ve bildirim kanallarına gönderildi.\n\n---\n\n{msg}"
+    except Exception as e:
+        return f"❌ Sabah raporu hatası: {e}"
+
+
+def run_closing_report_now():
+    try:
+        from scheduler import generate_closing_report
+        msg = generate_closing_report()
+        return f"✅ Kapanış raporu oluşturuldu ve bildirim kanallarına gönderildi.\n\n---\n\n{msg}"
+    except Exception as e:
+        return f"❌ Kapanış raporu hatası: {e}"
+
+
+# ============================================================
+# TAB: SOHBET
 # ============================================================
 def chat_analysis(message, history):
     if not message or not message.strip():
@@ -601,20 +635,51 @@ with gr.Blocks(title="🤖 Trade Bot Advisor v2.0") as demo:
                     po_out = gr.Markdown(value="*Varlıkları girin ve butona tıklayın…*")
             po_btn.click(fn=run_portfolio_optimizer, inputs=[po_tickers, po_period], outputs=po_out)
 
-        # TAB 6: Watchlist
+        # TAB 6: Sektör Korelasyon
+        with gr.Tab("🔗 Sektör Korelasyon"):
+            gr.Markdown("### BIST Sektör Korelasyon Matrisi — hangi sektörler birlikte hareket ediyor?")
+            with gr.Row():
+                with gr.Column(scale=1):
+                    sc_period = gr.Radio(label="📅 Dönem", choices=["3mo", "6mo", "1y", "2y"], value="6mo")
+                    sc_btn = gr.Button("🔗 Korelasyon Hesapla", variant="primary", size="lg")
+                with gr.Column(scale=2):
+                    sc_out = gr.Markdown(value="*Dönem seçin ve butona tıklayın…*")
+            sc_btn.click(fn=run_sector_correlation, inputs=[sc_period], outputs=sc_out)
+
+        # TAB 7: Zamanlı Raporlar
+        with gr.Tab("⏰ Zamanlı Raporlar"):
+            gr.Markdown("### Otomatik Sabah/Kapanış Raporları + Saatlik Alertler")
+            gr.Markdown("""
+**Aktif zamanlamalar:**
+- 🌅 **Sabah Raporu** — 09:30 (TR) — BIST açılış öncesi, KAP bildirimleri, makro takvim
+- 🌆 **Kapanış Raporu** — 18:30 (TR) — günün özeti, performans, yarın izlenecekler
+- ⏱️ **Saatlik Alert** — 10:00-18:00 (TR, hafta içi) — watchlist kontrolü
+
+Raporlar aktif bildirim kanallarına gönderilir (Telegram/Discord/WhatsApp).
+""")
+            with gr.Row():
+                with gr.Column():
+                    rpt_morning_btn = gr.Button("🌅 Sabah Raporunu Şimdi Oluştur", variant="primary")
+                    rpt_closing_btn = gr.Button("🌆 Kapanış Raporunu Şimdi Oluştur", variant="secondary")
+                with gr.Column():
+                    rpt_out = gr.Markdown(value="*Rapor burada gösterilecek…*")
+            rpt_morning_btn.click(fn=run_morning_report_now, inputs=[], outputs=rpt_out)
+            rpt_closing_btn.click(fn=run_closing_report_now, inputs=[], outputs=rpt_out)
+
+        # TAB 8: Watchlist
         with gr.Tab("👁️ Watchlist"):
             gr.Markdown("### Fiyat/RSI/VIX alertleri — otomatik bildirim")
             with gr.Row():
                 with gr.Column(scale=1):
-                    wl_ticker = gr.Textbox(label="📌 Ticker", placeholder="AAPL")
-                    wl_name = gr.Textbox(label="İsim (opsiyonel)", placeholder="Apple Inc")
+                    wl_ticker = gr.Textbox(label="📌 Ticker", placeholder="THYAO.IS")
+                    wl_name = gr.Textbox(label="İsim (opsiyonel)", placeholder="THY")
                     wl_type = gr.Dropdown(
                         label="Alert Tipi",
                         choices=["price_below", "price_above", "rsi_below", "rsi_above", "vix_above"],
                         value="price_below",
                     )
                     wl_value = gr.Number(label="Alert Değeri", value=150)
-                    wl_channel = gr.Radio(label="Bildirim Kanalı", choices=["telegram", "email", "discord"], value="telegram")
+                    wl_channel = gr.Radio(label="Bildirim Kanalı", choices=["telegram", "email", "discord", "whatsapp"], value="telegram")
                     wl_add_btn = gr.Button("➕ Ekle", variant="primary")
                     gr.Markdown("---")
                     wl_remove_id = gr.Number(label="Silinecek ID", value=0, precision=0)
