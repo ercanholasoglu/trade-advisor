@@ -6,13 +6,12 @@ Full-featured UI with 10 tabs:
 5. Portfolio Optimizer, 6. Watchlist, 7. Analysis History,
 8. Telegram, 9. Chat, 10. Guide
 
-Gradio queue enabled. FastAPI mount for REST API.
+Gradio queue enabled for concurrent request handling.
+Tool calls run in thread pool to avoid blocking the server.
 """
 
-import os
-import json
-import time
-import datetime
+import os, json, time, datetime
+import concurrent.futures
 import gradio as gr
 from agent import create_trade_advisor, run_analysis
 from tools.price_history import get_price_history
