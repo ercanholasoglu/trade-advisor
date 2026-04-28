@@ -91,6 +91,22 @@ def init_db():
             FOREIGN KEY (watchlist_id) REFERENCES watchlist(id)
         );
 
+        CREATE TABLE IF NOT EXISTS user_preferences (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            key TEXT UNIQUE NOT NULL,
+            value TEXT,
+            updated_at TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS scheduled_reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            report_type TEXT NOT NULL,  -- morning, closing, hourly
+            enabled INTEGER DEFAULT 1,
+            channel TEXT DEFAULT 'telegram',
+            channel_config TEXT,  -- JSON
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+
         CREATE INDEX IF NOT EXISTS idx_analyses_ticker ON analyses(ticker);
         CREATE INDEX IF NOT EXISTS idx_analyses_timestamp ON analyses(timestamp);
         CREATE INDEX IF NOT EXISTS idx_watchlist_active ON watchlist(active);
@@ -318,6 +334,52 @@ def save_alert_history(watchlist_id: int, ticker: str, alert_type: str,
     conn.execute("UPDATE watchlist SET last_triggered = datetime('now') WHERE id = ?",
                   (watchlist_id,))
     conn.commit()
+
+
+# ──────── User Preferences ────────
+
+def set_preference(key: str, value: str):
+    """Set or update a user preference."""
+    conn = _get_conn()
+    conn.execute("""
+        INSERT INTO user_preferences (key, value, updated_at)
+        VALUES (?, ?, datetime('now'))
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=datetime('now')
+    """, (key, value))
+    conn.commit()
+
+
+def get_preference(key: str, default: str = None) -> str | None:
+    """Get a user preference."""
+    conn = _get_conn()
+    row = conn.execute("SELECT value FROM user_preferences WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def get_all_preferences() -> dict:
+    """Get all preferences as a dict."""
+    conn = _get_conn()
+    rows = conn.execute("SELECT key, value FROM user_preferences").fetchall()
+    return {r["key"]: r["value"] for r in rows}
+
+
+# ──────── Scheduled Reports Config ────────
+
+def save_report_config(report_type: str, enabled: bool, channel: str, channel_config: dict = None):
+    """Save scheduled report configuration."""
+    conn = _get_conn()
+    conn.execute("""
+        INSERT INTO scheduled_reports (report_type, enabled, channel, channel_config)
+        VALUES (?, ?, ?, ?)
+    """, (report_type, 1 if enabled else 0, channel, json.dumps(channel_config or {})))
+    conn.commit()
+
+
+def get_report_configs() -> list[dict]:
+    """Get all scheduled report configurations."""
+    conn = _get_conn()
+    rows = conn.execute("SELECT * FROM scheduled_reports ORDER BY report_type").fetchall()
+    return [dict(r) for r in rows]
 
 
 # Initialize DB on import
