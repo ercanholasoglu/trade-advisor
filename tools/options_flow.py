@@ -5,21 +5,12 @@ Put/Call ratio, unusual volume detection via yfinance options API.
 """
 
 from smolagents import tool
+from tools.cache import cache, TTL_OPTIONS
 
 
-@tool
-def get_options_flow(ticker: str) -> str:
-    """
-    Analyzes options activity for a stock using yfinance options API.
-    Calculates Put/Call ratio, detects unusual volume, and identifies sentiment signals.
-    High put/call ratio is a bearish signal; high call volume is bullish.
 
-    Args:
-        ticker: US stock ticker symbol (e.g. 'AAPL', 'NVDA', 'TSLA'). Must have listed options.
-
-    Returns:
-        JSON string with put/call ratio, volume analysis, unusual activity flags, and signals.
-    """
+@cache(ttl=TTL_OPTIONS)
+def _cached_get_options_flow(ticker: str) -> str:
     import yfinance as yf
     import json
     import numpy as np
@@ -184,3 +175,19 @@ def get_options_flow(ticker: str) -> str:
 
     except Exception as e:
         return json.dumps({"error": str(e), "ticker": ticker})
+
+
+@tool
+def get_options_flow(ticker: str) -> str:
+    """
+    Analyzes options activity for a stock using yfinance options API.
+    Calculates Put/Call ratio, detects unusual volume, and identifies sentiment signals.
+    High put/call ratio is a bearish signal; high call volume is bullish.
+
+    Args:
+        ticker: US stock ticker symbol (e.g. 'AAPL', 'NVDA', 'TSLA'). Must have listed options.
+
+    Returns:
+        JSON string with put/call ratio, volume analysis, unusual activity flags, and signals.
+    """
+    return _cached_get_options_flow(ticker)
