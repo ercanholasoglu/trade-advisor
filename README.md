@@ -1,5 +1,5 @@
 ---
-title: 🤖 Trade Bot Advisor v3.0
+title: 🤖 Trade Bot Advisor v3.5
 emoji: 📈
 colorFrom: blue
 colorTo: green
@@ -13,77 +13,74 @@ tags:
   - finance
   - technical-analysis
   - backtesting
+  - portfolio-simulation
   - signals
 ---
 
-# 🤖 Trade Bot Advisor v3.0 — Signal-First Architecture
+# 🤖 Trade Bot Advisor v3.5 — Signal-First + Evaluation + Portfolio
 
-> **Kural tabanlı sinyal motoru** • **Backtesting** • **Yapılandırılmış JSON çıktı** • **Explainability** • **LLM = sadece yorumlayıcı**
+> **Signal Engine** • **AI Trade Decision** • **Evaluation Dashboard** • **Portfolio Simulation** • **Backtesting** • **Explainability**
 
-## v3.0 Mimari
+## 8 Tab
 
-```
-Kullanıcı → Ticker girer
-              ↓
-         Signal Engine (kural tabanlı, deterministic)
-         ├── RSI(14) — momentum
-         ├── SMA(20/50) crossover — trend
-         ├── MACD(12,26,9) — momentum değişimi
-         ├── Bollinger Bands(20,2) — fiyat bandı
-         ├── Volume analizi — hacim onayı
-         └── Volatility filter — extreme filtreleme
-              ↓
-         5 indikatör oyu → BUY/SELL/HOLD
-              ↓
-         Structured JSON output
-         {"signal": "BUY", "confidence": 0.62, "reason": "...", "risk": "medium"}
-              ↓
-         LLM Interpreter (opsiyonel, sadece açıklama)
-              ↓
-         Backtest ile geçmiş veride doğrulama
-```
-
-## v2.0 → v3.0 Değişiklikler
-
-| | v2.0 | v3.0 |
-|---|---|---|
-| **Sinyal kaynağı** | LLM council (karar verici) | Kural tabanlı motor (deterministic) |
-| **LLM rolü** | Karar verici | Sadece yorumlayıcı |
-| **Output** | Serbest metin ("Looks bullish...") | `{"signal": "BUY", "confidence": 0.62}` |
-| **Backtest** | Basit doğruluk | Equity curve + signal map + Sharpe + drawdown |
-| **Explainability** | Yok | "Bu trade neden mantıklı?" detaylı dökümanlı |
-| **Demo reliability** | API'ye bağımlı (crash riski) | Sample data fallback (her zaman çalışır) |
-| **Volatility filter** | Yok | Extreme volatilitede AL filtrelenir |
-
-## 5 Tab
-
-1. **📊 Analiz** — Sinyal + Candlestick + RSI/MACD + JSON + Yorum
-2. **📊 Backtest** — Stratejiyi geçmiş veride test et (equity curve, signal map)
-3. **🔄 Karşılaştırma** — 2-5 ticker yan yana
-4. **🧠 Explainability** — "Bu trade neden mantıklı?" detaylı rapor
-5. **📖 Rehber** — Kullanım kılavuzu
-
-## Sinyal Kuralları
-
-| Koşul | Sinyal |
+| Tab | Özellik |
 |---|---|
-| 3+/5 bullish indikatör | **BUY** |
-| 4+/5 bullish | **STRONG_BUY** |
-| 3+/5 bearish | **SELL** |
-| 4+/5 bearish | **STRONG_SELL** |
-| Extreme volatility + BUY → | **HOLD** (filtre) |
+| 📊 **Analiz** | Tek hisse sinyal + candlestick + RSI/MACD + JSON + yorum |
+| 📊 **Backtest** | RSI+SMA stratejisini geçmiş veride test — equity curve, Sharpe, drawdown |
+| 🔄 **Karşılaştırma** | 2-5 ticker yan yana karşılaştır |
+| 🧠 **Explainability** | "Bu trade neden mantıklı?" — tam indikatör dökümü |
+| 🤖 **AI Decision** | **YENİ** — Sinyal → açıklama → backtest doğrulama → portföy execution |
+| 📊 **Evaluation** | **YENİ** — Son 50 sinyal, başarı oranı, PnL, drawdown dashboard |
+| 💼 **Portföy Sim** | **YENİ** — Stateful portföy: pozisyon aç/kapat, P&L, trade geçmişi |
+| 📖 **Rehber** | Kullanım kılavuzu |
 
-## Desteklenen Varlıklar
+## Yeni: AI Trade Decision Pipeline
 
-| Tür | Format | Örnekler |
-|---|---|---|
-| 🇺🇸 US Stocks | `TICKER` | AAPL, NVDA, MSFT, TSLA |
-| 🇹🇷 BIST | `TICKER.IS` | THYAO.IS, GARAN.IS |
-| ₿ Kripto | `TICKER-USD` | BTC-USD, ETH-USD |
-| 🪙 Emtia | Futures | GC=F (Altın), SI=F (Gümüş) |
+```
+Ticker listesi gir (AAPL, NVDA, MSFT)
+              ↓
+    ┌─────────────────────────────┐
+    │  Her ticker için:           │
+    │  1. Signal Engine → sinyal  │
+    │  2. Backtest → doğrulama    │
+    │  3. Explanation → neden     │
+    │  4. Portfolio → execute     │
+    └─────────────────────────────┘
+              ↓
+    Sonuç: Hangi ticker'a girdi, neden, backtest doğruluğu,
+           portföy P&L, equity curve, drawdown
+```
+
+## Yeni: Evaluation Dashboard
+
+- **Son 50 sinyal** tablosu (tarih, ticker, sinyal, giriş/çıkış, PnL, doğruluk)
+- **Birleşik equity curve** (tüm ticker'lar)
+- **Drawdown chart**
+- **Sinyal dağılımı** (BUY vs SELL doğruluk)
+- **Ticker bazında başarı oranı**
+
+## Yeni: Portfolio Simulation
+
+- Stateful portföy — pozisyonlar session boyunca korunur
+- Her sinyal otomatik execute edilir
+- Açık pozisyonlar, kapalı trade'ler, P&L takibi
+- Win rate, profit factor, max drawdown metrikleri
+- Portföy sıfırlama
+
+## Signal Engine
+
+```
+RSI(14) + SMA(20/50) crossover + MACD(12,26,9) + Bollinger(20,2) + Volume
+                        ↓
+              5 indikatör oylama
+                        ↓
+         3+/5 bullish = BUY, 4+/5 = STRONG_BUY
+         3+/5 bearish = SELL, 4+/5 = STRONG_SELL
+         Extreme volatility → BUY filtrelenir
+```
 
 ## Tech Stack
 
-Python + Gradio + yfinance + NumPy + Pandas + Plotly
+Python + Gradio + yfinance + Binance API + NumPy + Pandas + Plotly
 
 ⚠️ **DISCLAIMER:** Eğitim ve araştırma amaçlıdır. Yatırım tavsiyesi değildir.
