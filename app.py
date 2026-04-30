@@ -1,929 +1,568 @@
 """
-🤖 Trade Bot Advisor — Gradio UI v3.0
-========================================
+🤖 Trade Bot Advisor v3.0 — Signal-First Architecture
+=========================================================
 Architecture:
-  Signal generation → deterministic (core/strategy.py)
-  LLM council → analysis + explanation only (never generates signals)
-  Paper trading → virtual portfolio with risk limits (core/safety.py)
-  Fallback data → Space always works even when APIs are down
+  Signal Engine (deterministic) → THE decision maker
+  LLM → interpreter/explainer ONLY (never generates signals)
+  Backtesting → proves the strategy works on historical data
+  Structured output → JSON, not "Looks bullish..."
+  Sample data fallback → Space ALWAYS works
+
+v3.0 Changes:
+  ❌ LLM = decision maker → ✅ LLM = interpreter
+  ❌ "Looks bullish..." → ✅ {"signal": "BUY", "confidence": 0.62, ...}
+  ✅ Real signal system: SMA crossover + RSI + volatility filter
+  ✅ Full backtesting engine with equity curves
+  ✅ Explainability: "Why does this trade make sense?"
+  ✅ Sample data fallback — demo always works
 """
 
-import os, json, time, datetime
-import concurrent.futures
+import os
+import json
+import datetime
 import gradio as gr
-from agent import create_trade_advisor, run_analysis
-from tools.price_history import get_price_history
-from tools.technical_indicators import get_technical_indicators
-from tools.news_sentiment import get_news_sentiment
-from tools.fundamental_analysis import get_fundamental_data
-from tools.risk_calculator import calculate_risk_metrics
-from tools.market_overview import get_market_overview
-from tools.bist_scanner import get_bist_scanner
-from tools.kap_disclosures import get_kap_disclosures
-from tools.daily_dashboard import get_daily_dashboard
-from tools.crypto_fundamental import get_crypto_fundamentals
-from tools.insider_trades import get_insider_trades
-from tools.options_flow import get_options_flow
-from tools.macro_data import get_macro_data
-from tools.sector_correlation import get_sector_correlation
-from core.strategy import generate_signal
-from core.safety import get_paper_portfolio, reset_paper_portfolio
-from core.monitoring import setup_logging, get_health
-from core.data_ingest import get_fallback
-from output_schema import parse_trade_report, report_to_markdown
-from db import (
-    init_db, save_analysis, get_accuracy_stats, get_recent_analyses,
-    add_watchlist, get_watchlist, remove_watchlist,
+import numpy as np
+
+from core.signal_engine import generate_signal
+from core.backtester import run_backtest
+from core.data_ingest import fetch_ohlcv, get_ticker_name
+from core.charts import (
+    build_candlestick_chart, build_indicator_panel,
+    build_equity_curve, build_backtest_signals_chart,
 )
-
-# Initialize database
-init_db()
-
-# Structured logging
-setup_logging(os.environ.get("LOG_LEVEL", "INFO"))
-
-# Start scheduler (if APScheduler available)
-_scheduler = None
-try:
-    from scheduler import start_scheduler
-    _scheduler = start_scheduler()
-except Exception:
-    pass
-
-_advisor = None
+from core.llm_interpreter import interpret_signal, _template_interpret
 
 
-def get_advisor():
-    global _advisor
-    if _advisor is None:
-        _advisor = create_trade_advisor(
-            hf_token=os.environ.get("HF_TOKEN", ""),
-            model_id=os.environ.get("MODEL_ID", "Qwen/Qwen2.5-72B-Instruct"),
-            fast_model_id=os.environ.get("FAST_MODEL_ID"),
-            deep_model_id=os.environ.get("DEEP_MODEL_ID"),
-        )
-    return _advisor
+# ═══════════════════════════════════════════════════════
+# TAB 1: QUICK ANALYSIS — Signal + Charts + Structured Output
+# ═══════════════════════════════════════════════════════
 
-
-def _safe_json(raw):
-    try:
-        return json.loads(raw)
-    except Exception:
-        return {"error": raw}
-
-
-# ============================================================
-# TAB 1: GÜNLÜK DASHBOARD
-# ============================================================
-def run_daily_dashboard(market, portfolio_value):
-    accumulated = f"## 📊 Günlük Dashboard Oluşturuluyor…\n**Piyasa:** {market} | **Portföy:** ${portfolio_value:,.0f}\n\n"
-    yield accumulated
-
-    accumulated += "⏳ BIST + US hisseleri taranıyor, emtia verileri çekiliyor…\n\n"
-    yield accumulated
-
-    try:
-        raw = get_daily_dashboard(market=market.lower(), portfolio_value=portfolio_value)
-        d = _safe_json(raw)
-    except Exception as e:
-        yield accumulated + f"❌ Hata: {e}"
-        return
-
-    if "error" in d:
-        yield accumulated + f"❌ Hata: {d['error']}"
-        return
-
-    ms = d.get("market_summary", {})
-    accumulated += "## 🌍 Piyasa Durumu\n\n"
-    if "bist100" in ms:
-        b = ms["bist100"]
-        accumulated += f"🇹🇷 **BIST 100:** {b['value']:,.2f} ({b['change_pct']:+.2f}%)\n\n"
-    if "sp500" in ms:
-        s = ms["sp500"]
-        accumulated += f"🇺🇸 **S&P 500:** {s['value']:,.2f} ({s['change_pct']:+.2f}%)\n\n"
-    if "vix" in ms:
-        accumulated += f"😱 **VIX:** {ms['vix']}\n\n"
-
-    cm = d.get("commodities_try", {})
-    if cm:
-        accumulated += "## 🪙 Emtia & Döviz\n\n"
-        accumulated += "| Varlık | Fiyat |\n|---|---|\n"
-        accumulated += f"| 🥇 Altın | **₺{cm.get('gold_try_gram', '?')}/gram** (${cm.get('gold_usd_oz', '?')}/oz) |\n"
-        accumulated += f"| 🥈 Gümüş | **₺{cm.get('silver_try_gram', '?')}/gram** |\n"
-        accumulated += f"| 💵 USD/TRY | **{cm.get('usd_try', '?')}** |\n\n"
-
-    alerts = d.get("alerts", [])
-    if alerts:
-        accumulated += "## 🚨 Uyarılar\n\n"
-        for a in alerts:
-            accumulated += f"- {a}\n"
-        accumulated += "\n"
-    yield accumulated
-
-    buys = d.get("buy_recommendations", [])
-    accumulated += f"## 📈 AL Sinyalleri ({len(buys)} hisse)\n\n"
-    if buys:
-        accumulated += "| Hisse | Fiyat | Değişim | RSI | Sinyal |\n|---|---|---|---|---|\n"
-        for b in buys:
-            accumulated += f"| **{b['ticker']}** ({b['name']}) | {b['price']} | {b['change_pct']:+.2f}% | {b['rsi']} | {b['signal']} |\n"
-    else:
-        accumulated += "*Bugün AL sinyali yok.*\n"
-    accumulated += "\n"
-    yield accumulated
-
-    sells = d.get("sell_recommendations", [])
-    accumulated += f"## 📉 SAT Sinyalleri ({len(sells)} hisse)\n\n"
-    if sells:
-        accumulated += "| Hisse | Fiyat | Değişim | RSI | Sinyal |\n|---|---|---|---|---|\n"
-        for s in sells:
-            accumulated += f"| **{s['ticker']}** ({s['name']}) | {s['price']} | {s['change_pct']:+.2f}% | {s['rsi']} | {s['signal']} |\n"
-    else:
-        accumulated += "*Bugün SAT sinyali yok.*\n"
-    accumulated += "\n"
-    yield accumulated
-
-    accumulated += "## 🏆 Günün Yıldızları\n\n"
-    accumulated += "| # | Hisse | Değişim |\n|---|---|---|\n"
-    for i, g in enumerate(d.get("top_gainers", [])[:5], 1):
-        accumulated += f"| 🟢 {i} | **{g['ticker']}** ({g['name']}) | **{g['change_pct']:+.2f}%** |\n"
-    accumulated += "\n## 📉 Günün Düşenleri\n\n"
-    accumulated += "| # | Hisse | Değişim |\n|---|---|---|\n"
-    for i, l in enumerate(d.get("top_losers", [])[:5], 1):
-        accumulated += f"| 🔴 {i} | **{l['ticker']}** ({l['name']}) | **{l['change_pct']:+.2f}%** |\n"
-
-    accumulated += f"\n---\n📋 **Özet:** {d.get('summary', '')}\n\n⚠️ *Yatırım tavsiyesi değildir.*"
-    yield accumulated
-
-
-# ============================================================
-# TAB 2: HIZLI ANALİZ (streaming)
-# ============================================================
-def run_direct_analysis(ticker, pv, rt):
+def run_analysis(ticker, portfolio_value, risk_tolerance):
+    """Main analysis pipeline: Signal Engine → Charts → Structured JSON → LLM Interpretation."""
     ticker = ticker.strip().upper()
-    results = {}
-    data_errors = []
-
-    yield "⏳ **[1/7]** Fiyat verisi çekiliyor…\n"
-    try:
-        results["price"] = _safe_json(get_price_history(ticker, period="1mo", interval="1d"))
-        cp = results["price"].get("current_price", "?")
-        chg = results["price"].get("price_change_pct", 0)
-        yield f"✅ **[1/7]** Fiyat: **${cp}** ({chg:+.2f}%)\n\n"
-    except Exception as e:
-        data_errors.append(f"Fiyat verisi: {e}")
-        cp, chg = "?", 0
-        yield f"⚠️ **[1/7]** Fiyat verisi alınamadı: {e}\n\n"
-
-    yield "⏳ **[2/7]** Teknik indikatörler…\n"
-    try:
-        results["technical"] = _safe_json(get_technical_indicators(ticker, period="3mo"))
-        ts = results["technical"].get("overall_signal", "N/A")
-        rsi = results["technical"].get("indicators", {}).get("rsi", {}).get("value", "?")
-        macd = results["technical"].get("indicators", {}).get("macd", {}).get("signal", "?")
-        yield f"✅ **[2/7]** Teknik: **{ts}** (RSI: {rsi}, MACD: {macd})\n\n"
-    except Exception as e:
-        data_errors.append(f"Teknik analiz: {e}")
-        ts, rsi, macd = "N/A", "?", "?"
-        yield f"⚠️ **[2/7]** Teknik analiz alınamadı: {e}\n\n"
-
-    yield "⏳ **[3/7]** Haberler + sentiment…\n"
-    try:
-        results["sentiment"] = _safe_json(get_news_sentiment(ticker, company_name=""))
-        sent = results["sentiment"].get("overall_sentiment", "N/A")
-        na = results["sentiment"].get("news_count", 0)
-        method = results["sentiment"].get("sentiment_method", "keyword")
-        yield f"✅ **[3/7]** Sentiment: **{sent}** ({na} haber, {method})\n\n"
-    except Exception as e:
-        data_errors.append(f"Sentiment: {e}")
-        sent, na = "N/A", 0
-        yield f"⚠️ **[3/7]** Sentiment alınamadı: {e}\n\n"
-
-    yield "⏳ **[4/7]** Temel veriler…\n"
-    try:
-        results["fundamental"] = _safe_json(get_fundamental_data(ticker))
-        pe = results["fundamental"].get("valuation", {}).get("pe_forward", "N/A")
-        rec = results["fundamental"].get("analyst_targets", {}).get("recommendation", "N/A")
-        name = results["fundamental"].get("profile", {}).get("name", ticker)
-        mcap = results["fundamental"].get("profile", {}).get("market_cap_formatted", "N/A")
-        yield f"✅ **[4/7]** **{name}** — P/E: {pe}, Analist: {rec}, MCap: {mcap}\n\n"
-    except Exception as e:
-        data_errors.append(f"Temel veriler: {e}")
-        pe, rec, name, mcap = "N/A", "N/A", ticker, "N/A"
-        yield f"⚠️ **[4/7]** Temel veriler alınamadı: {e}\n\n"
-
-    yield "⏳ **[5/7]** Piyasa durumu…\n"
-    try:
-        results["market"] = _safe_json(get_market_overview())
-        regime = results["market"].get("market_regime", "N/A")
-        vix = results["market"].get("vix", {}).get("value", "?")
-        vr = results["market"].get("vix", {}).get("regime", "?")
-        yield f"✅ **[5/7]** Piyasa: **{regime}** (VIX: {vix} — {vr})\n\n"
-    except Exception as e:
-        data_errors.append(f"Piyasa durumu: {e}")
-        regime, vix, vr = "N/A", "?", "?"
-        yield f"⚠️ **[5/7]** Piyasa durumu alınamadı: {e}\n\n"
-
-    yield "⏳ **[6/7]** Risk metrikleri…\n"
-    try:
-        results["risk"] = _safe_json(calculate_risk_metrics(ticker, portfolio_value=pv, risk_tolerance=rt.lower()))
-        vol = results["risk"].get("volatility", {}).get("regime", "N/A")
-        sl = results["risk"].get("trade_levels", {}).get("stop_loss", "?")
-        tp = results["risk"].get("trade_levels", {}).get("take_profit", "?")
-        shares = results["risk"].get("position_sizing", {}).get("suggested_shares", "?")
-        rr = results["risk"].get("trade_levels", {}).get("risk_reward_ratio", "?")
-        yield f"✅ **[6/7]** Risk: Vol **{vol}** | SL: ${sl} | TP: ${tp} | {shares} hisse | R/R: {rr}\n\n"
-    except Exception as e:
-        data_errors.append(f"Risk metrikleri: {e}")
-        vol, sl, tp, shares, rr = "N/A", "?", "?", "?", "?"
-        yield f"⚠️ **[6/7]** Risk metrikleri alınamadı: {e}\n\n"
-
-    yield "⏳ **[7/7]** Makro ortam…\n"
-    try:
-        results["macro"] = _safe_json(get_macro_data(region="both"))
-        global_regime = results["macro"].get("global_regime", "N/A")
-        risk_factor = results["macro"].get("global_risk_factor", "?")
-        yield f"✅ **[7/7]** Makro: **{global_regime}** (Risk: {risk_factor}/10)\n\n"
-    except Exception as e:
-        data_errors.append(f"Makro veriler: {e}")
-        yield f"⚠️ **[7/7]** Makro veriler alınamadı: {e}\n\n"
-
-    if data_errors:
-        yield "⚠️ **Veri hataları:** " + ", ".join(data_errors) + "\n\n"
-
-    yield "🎯 **Fund Manager** council'ı topluyor ve sentezliyor…\n\n"
-    try:
-        advisor = get_advisor()
-        q = f"Analyze {ticker} ({name}). Data: price=${cp} chg={chg}%, tech={ts} RSI={rsi} MACD={macd}, sentiment={sent}, PE={pe} rec={rec} mcap={mcap}, market={regime} VIX={vix}, risk: vol={vol} SL=${sl} TP=${tp} shares={shares} RR={rr}. Portfolio ${pv:,.0f}, risk={rt}."
-        if data_errors:
-            q += f" DATA ERRORS: {'; '.join(data_errors)}. Reduce confidence accordingly."
-        q += " Run FULL council debate (bull + bear + mediator). Produce TRADE ADVISOR REPORT with JSON block."
-
-        raw_result = str(advisor.run(q))
-
-        # Try structured parsing
-        report, _ = parse_trade_report(raw_result)
-        if report:
-            # Save to DB
-            try:
-                save_analysis(
-                    ticker=report.ticker, signal=report.signal.value,
-                    confidence=report.confidence, entry_price=report.entry_price,
-                    stop_loss=report.stop_loss, take_profit=report.take_profit,
-                    shares=report.shares, risk_reward=report.risk_reward,
-                    technical_signal=report.technical_signal, sentiment=report.sentiment,
-                    fundamental_signal=report.fundamental_signal, market_regime=report.market_regime,
-                    vix=report.vix, reasoning=report.reasoning, raw_report=raw_result,
-                )
-            except Exception:
-                pass
-            yield f"\n---\n\n{report_to_markdown(report)}"
-        else:
-            # Fallback to raw markdown
-            yield f"\n---\n\n{raw_result}"
-
-    except Exception as e:
-        sig = ts
-        emoji = "🟢" if "BUY" in str(sig) else ("🔴" if "SELL" in str(sig) else "🟡")
-        signal = "BUY" if "BUY" in str(sig) else ("SELL" if "SELL" in str(sig) else "HOLD")
-        tl = results.get("risk", {}).get("trade_levels", {})
-        yield f"\n{emoji} **{signal}** — {name} ({ticker})\n\n| | |\n|---|---|\n| Entry | ${tl.get('entry_price', '?')} |\n| SL | ${sl} |\n| TP | ${tp} |\n| Hisse | {shares} |\n| R/R | {rr} |\n\n⚠️ Council çalıştırılamadı: {e}\n\n⚠️ *Yatırım tavsiyesi değildir.*"
-
-
-def quick_analysis_streaming(ticker, pv, rt):
-    if not ticker or not ticker.strip():
-        yield "❌ Ticker girin"
-        return
-    a = ""
-    for c in run_direct_analysis(ticker, pv, rt):
-        a += c
-        yield a
-
-
-# ============================================================
-# TAB 3: KARŞILAŞTIRMA
-# ============================================================
-def compare_tickers(ts, pv, rt):
-    if not ts or not ts.strip():
-        yield "❌ En az 2 ticker girin"
-        return
-    tickers = [t.strip().upper() for t in ts.split(",") if t.strip()]
-    if len(tickers) < 2:
-        yield "❌ En az 2 ticker"
-        return
-    if len(tickers) > 5:
-        yield "❌ Max 5 ticker"
-        return
-    results = {}
-    a = f"## 🔄 {', '.join(tickers)} Karşılaştırılıyor\n\n"
-    yield a
-    for i, t in enumerate(tickers):
-        a += f"### 📊 {t} ({i + 1}/{len(tickers)})\n"
-        yield a
-        try:
-            pd_data = _safe_json(get_price_history(t, "1mo"))
-            td = _safe_json(get_technical_indicators(t, "3mo"))
-            fd = _safe_json(get_fundamental_data(t))
-            rd = _safe_json(calculate_risk_metrics(t, pv, rt.lower()))
-            r = {
-                "name": fd.get("profile", {}).get("name", t),
-                "price": pd_data.get("current_price", "?"),
-                "change": pd_data.get("price_change_pct", 0),
-                "tech": td.get("overall_signal", "?"),
-                "pe": fd.get("valuation", {}).get("pe_forward", "?"),
-                "rec": fd.get("analyst_targets", {}).get("recommendation", "?"),
-                "rsi": td.get("indicators", {}).get("rsi", {}).get("value", "?"),
-                "rr": rd.get("trade_levels", {}).get("risk_reward_ratio", "?"),
-                "vol": rd.get("volatility", {}).get("regime", "?"),
-                "sharpe": rd.get("risk_metrics", {}).get("sharpe_ratio_approx", "?"),
-            }
-            results[t] = r
-            a += f"- **{r['name']}** ${r['price']} ({r['change']:+.2f}%) Tech:{r['tech']} RSI:{r['rsi']}\n\n"
-            yield a
-        except Exception as e:
-            a += f"⚠️ {t}: {e}\n\n"
-            yield a
-    if results:
-        a += "\n## 📋 Karşılaştırma Tablosu\n\n"
-        a += "| Metrik | " + " | ".join(results.keys()) + " |\n"
-        a += "|---|" + ("|".join(["---"] * len(results))) + "|\n"
-        for label, fn in [
-            ("Fiyat", lambda r: f"${r['price']}"),
-            ("Teknik", lambda r: f"**{r['tech']}**"),
-            ("RSI", lambda r: str(r['rsi'])),
-            ("P/E", lambda r: str(r['pe'])),
-            ("Analist", lambda r: str(r['rec'])),
-            ("R/R", lambda r: str(r['rr'])),
-            ("Volatilite", lambda r: str(r['vol'])),
-        ]:
-            a += f"| {label} | " + " | ".join(fn(r) for r in results.values()) + " |\n"
-    a += "\n⚠️ *Yatırım tavsiyesi değildir.*\n"
-    yield a
-
-
-# ============================================================
-# TAB 4: BACKTEST
-# ============================================================
-def run_backtest_ui(ticker, period, holding_days, rsi_buy, rsi_sell, use_sma):
-    if not ticker or not ticker.strip():
-        return "❌ Ticker girin"
-    try:
-        from backtest import run_backtest, format_backtest_markdown
-        result = run_backtest(
-            ticker.strip().upper(),
-            period_years=period,
-            holding_days=int(holding_days),
-            rsi_buy=rsi_buy,
-            rsi_sell=rsi_sell,
-            use_sma_filter=use_sma,
-        )
-        return format_backtest_markdown(result)
-    except Exception as e:
-        return f"❌ Backtest hatası: {e}"
-
-
-# ============================================================
-# TAB 5: PORTFÖY OPTİMİZASYONU
-# ============================================================
-def run_portfolio_optimizer(tickers_str, period):
-    if not tickers_str or not tickers_str.strip():
-        return "❌ En az 2 ticker girin (virgülle ayırın)"
-    try:
-        from portfolio_optimizer import optimize_portfolio, format_portfolio_markdown
-        tickers = [t.strip() for t in tickers_str.split(",") if t.strip()]
-        if len(tickers) < 2:
-            return "❌ En az 2 ticker gerekli"
-        result = optimize_portfolio(tickers, period)
-        return format_portfolio_markdown(result)
-    except Exception as e:
-        return f"❌ Optimizasyon hatası: {e}"
-
-
-# ============================================================
-# TAB 6: WATCHLIST
-# ============================================================
-def add_to_watchlist(ticker, name, alert_type, alert_value, channel):
     if not ticker:
-        return "❌ Ticker girin", get_watchlist_display()
-    try:
-        add_watchlist(ticker.strip().upper(), name, alert_type, alert_value, channel)
-        return f"✅ {ticker.upper()} watchlist'e eklendi!", get_watchlist_display()
-    except Exception as e:
-        return f"❌ Hata: {e}", get_watchlist_display()
-
-
-def remove_from_watchlist(watchlist_id):
-    try:
-        remove_watchlist(int(watchlist_id))
-        return "✅ Silindi!", get_watchlist_display()
-    except Exception as e:
-        return f"❌ {e}", get_watchlist_display()
-
-
-def get_watchlist_display():
-    items = get_watchlist()
-    if not items:
-        return "📋 Watchlist boş — yukarıdan varlık ekleyin."
-    md = "## 📋 Watchlist\n\n| ID | Ticker | İsim | Alert | Değer | Kanal | Son Tetik |\n|---|---|---|---|---|---|---|\n"
-    for item in items:
-        md += f"| {item['id']} | **{item['ticker']}** | {item.get('name', '')} | {item['alert_type']} | {item['alert_value']} | {item.get('notification_channel', 'telegram')} | {item.get('last_triggered', 'Hiç')} |\n"
-    return md
-
-
-# ============================================================
-# TAB 7: ANALİZ GEÇMİŞİ
-# ============================================================
-def get_history_display(ticker_filter):
-    try:
-        ticker = ticker_filter.strip().upper() if ticker_filter and ticker_filter.strip() else None
-        stats = get_accuracy_stats(ticker)
-        md = "## 📊 Analiz Geçmişi\n\n"
-
-        if "accuracy_7d" in stats:
-            a7 = stats["accuracy_7d"]
-            emoji = "🟢" if a7["accuracy_pct"] >= 60 else ("🟡" if a7["accuracy_pct"] >= 50 else "🔴")
-            md += f"### {emoji} 7 Günlük Doğruluk: **{a7['accuracy_pct']}%** ({a7['correct']}/{a7['total']})\n"
-            md += f"Ortalama getiri: **{a7['avg_return_pct']:+.2f}%**\n\n"
-
-        if "accuracy_30d" in stats:
-            a30 = stats["accuracy_30d"]
-            emoji = "🟢" if a30["accuracy_pct"] >= 60 else ("🟡" if a30["accuracy_pct"] >= 50 else "🔴")
-            md += f"### {emoji} 30 Günlük Doğruluk: **{a30['accuracy_pct']}%** ({a30['correct']}/{a30['total']})\n"
-            md += f"Ortalama getiri: **{a30['avg_return_pct']:+.2f}%**\n\n"
-
-        recent = stats.get("recent_analyses", [])
-        if recent:
-            md += "### Son Analizler\n\n"
-            md += "| Tarih | Ticker | Sinyal | Güven | Giriş | 7G Getiri | 30G Getiri |\n|---|---|---|---|---|---|---|\n"
-            for r in recent:
-                r7 = f"{r.get('return_7d_pct', ''):+.2f}%" if r.get('return_7d_pct') is not None else "⏳"
-                r30 = f"{r.get('return_30d_pct', ''):+.2f}%" if r.get('return_30d_pct') is not None else "⏳"
-                c7 = "✅" if r.get('signal_correct_7d') == 1 else ("❌" if r.get('signal_correct_7d') == 0 else "")
-                signal_emoji = "🟢" if r.get('signal') in ('BUY', 'STRONG_BUY') else ("🔴" if r.get('signal') in ('SELL', 'STRONG_SELL') else "🟡")
-                entry = f"${r['entry_price']:.2f}" if r.get('entry_price') else "N/A"
-                ts_short = r.get('timestamp', '')[:16]
-                md += f"| {ts_short} | **{r.get('ticker', '?')}** | {signal_emoji} {r.get('signal', '?')} | {r.get('confidence', '?')}% | {entry} | {c7} {r7} | {r30} |\n"
-        else:
-            md += "*Henüz analiz geçmişi yok.*\n"
-
-        return md
-    except Exception as e:
-        return f"❌ {e}"
-
-
-# ============================================================
-# TAB 8: TELEGRAM
-# ============================================================
-def send_telegram_alert(bt, ci, t, pv, rt):
-    if not bt or not ci:
-        yield "❌ Bot Token + Chat ID gerekli"
-        return
-    t = t.strip().upper()
-    if not t:
-        yield "❌ Ticker gerekli"
-        return
-    yield f"⏳ {t} analiz ediliyor…\n"
-    try:
-        td = _safe_json(get_technical_indicators(t, "3mo"))
-        rd = _safe_json(calculate_risk_metrics(t, pv, rt.lower()))
-        ts = td.get("overall_signal", "?")
-        rsi = td.get("indicators", {}).get("rsi", {}).get("value", "?")
-        tl = rd.get("trade_levels", {})
-        e = "🟢" if "BUY" in ts else ("🔴" if "SELL" in ts else "🟡")
-        msg = f"{e} *{t}* — *{ts}*\nRSI: {rsi}\nSL: ${tl.get('stop_loss', '?')} | TP: ${tl.get('take_profit', '?')}\nR/R: {tl.get('risk_reward_ratio', '?')}"
-        import requests
-        r = requests.post(
-            f"https://api.telegram.org/bot{bt}/sendMessage",
-            json={"chat_id": ci, "text": msg, "parse_mode": "Markdown"},
-            timeout=10,
+        empty_fig = _empty_plot("Enter a ticker")
+        return (
+            empty_fig, empty_fig, 
+            {"error": "No ticker provided"},
+            "❌ Ticker girin (örn: AAPL, THYAO.IS, BTC-USD)",
+            "N/A", "N/A", "N/A", "N/A"
         )
-        yield f"✅ Gönderildi!\n\n{msg}" if r.ok else f"❌ {r.text}"
-    except Exception as ex:
-        yield f"❌ {ex}"
+    
+    # 1. Generate signal (deterministic — no LLM)
+    signal = generate_signal(ticker, portfolio_value, risk_tolerance.lower(), period="3mo")
+    
+    # 2. Fetch data for charts
+    result = fetch_ohlcv(ticker, period="3mo", interval="1d")
+    df = result.get("df")
+    
+    # 3. Build charts
+    if df is not None and len(df) >= 10:
+        candlestick = build_candlestick_chart(df, ticker)
+        indicators = build_indicator_panel(df, ticker)
+    else:
+        candlestick = _empty_plot(f"No chart data for {ticker}")
+        indicators = _empty_plot("No indicator data")
+    
+    # 4. Structured JSON output
+    structured = {
+        "signal": signal["signal"],
+        "confidence": signal["confidence"] / 100,  # 0-1 scale
+        "reason": signal.get("reason", ""),
+        "risk": signal["risk"],
+        "ticker": signal["ticker"],
+        "price": signal["price"],
+        "indicators": {
+            "rsi": signal["indicators"]["rsi"]["value"],
+            "rsi_signal": signal["indicators"]["rsi"]["signal"],
+            "sma_crossover": signal["indicators"]["sma_crossover"]["signal"],
+            "macd": signal["indicators"]["macd"]["signal"],
+            "bollinger": signal["indicators"]["bollinger"]["signal"],
+            "volatility": signal["indicators"]["volatility"]["regime"],
+        },
+        "trade": signal["trade"],
+        "votes": signal["votes"],
+        "explainability": signal["explainability"],
+    }
+    
+    # 5. LLM Interpretation (or template fallback)
+    interpretation = _template_interpret(signal)
+    
+    # 6. Quick stats
+    sig_emoji = {"STRONG_BUY": "🟢🟢", "BUY": "🟢", "HOLD": "🟡", "SELL": "🔴", "STRONG_SELL": "🔴🔴"}.get(signal["signal"], "⚪")
+    signal_display = f"{sig_emoji} {signal['signal']}"
+    confidence_display = f"{signal['confidence']}%"
+    risk_display = signal["risk"].upper()
+    price_display = f"${signal['price']:,.2f}" if signal.get("price") else "N/A"
+    
+    return (
+        candlestick, indicators,
+        structured,
+        interpretation,
+        signal_display, confidence_display, risk_display, price_display,
+    )
 
 
-# ============================================================
-# TAB: SEKTÖR KORELASYON
-# ============================================================
-def run_sector_correlation(period):
-    try:
-        from tools.sector_correlation import get_sector_correlation, format_correlation_markdown
-        result_json = get_sector_correlation(period=period)
-        return format_correlation_markdown(result_json)
-    except Exception as e:
-        return f"❌ Korelasyon hatası: {e}"
+# ═══════════════════════════════════════════════════════
+# TAB 2: BACKTEST — Prove the strategy works
+# ═══════════════════════════════════════════════════════
+
+def run_backtest_ui(ticker, period_years, holding_days, rsi_buy, rsi_sell,
+                     use_sma, use_vol_filter, vol_threshold):
+    """Run backtest and return results + charts."""
+    ticker = ticker.strip().upper()
+    if not ticker:
+        empty_fig = _empty_plot("Enter a ticker")
+        return "❌ Ticker girin", empty_fig, empty_fig, empty_fig, {}
+    
+    result = run_backtest(
+        ticker,
+        period_years=period_years,
+        holding_days=int(holding_days),
+        rsi_buy=rsi_buy,
+        rsi_sell=rsi_sell,
+        use_sma_filter=use_sma,
+        use_volatility_filter=use_vol_filter,
+        vol_threshold=vol_threshold,
+    )
+    
+    if "error" in result:
+        empty_fig = _empty_plot(result["error"])
+        return f"❌ {result['error']}", empty_fig, empty_fig, empty_fig, result
+    
+    # Build charts
+    equity_chart = build_equity_curve(result)
+    signal_chart = build_backtest_signals_chart(result)
+    
+    # Fetch price data for candlestick
+    period_map = {0.5: "6mo", 1: "1y", 2: "2y", 3: "3y", 5: "5y"}
+    data = fetch_ohlcv(ticker, period=period_map.get(period_years, "1y"))
+    if data["df"] is not None:
+        price_chart = build_candlestick_chart(data["df"], ticker)
+    else:
+        price_chart = _empty_plot("No price data")
+    
+    # Format summary markdown
+    s = result["summary"]
+    r = result["returns"]
+    c = result["comparison"]
+    
+    acc_emoji = "🟢" if s["accuracy_pct"] >= 60 else ("🟡" if s["accuracy_pct"] >= 50 else "🔴")
+    perf_emoji = "🟢" if r["total_return_pct"] > 0 else "🔴"
+    vs_emoji = "🟢" if c["outperformance"] > 0 else "🔴"
+    
+    md = f"""## 📊 Backtest Sonuçları — {result['ticker']}
+**Veri:** {result['data_source']} | **Dönem:** {result['backtest_period']} | **Tutma:** {result['holding_days']} gün
+
+### {acc_emoji} Doğruluk: **%{s['accuracy_pct']}** ({s['total_signals']} sinyal)
+
+| Metrik | Değer |
+|---|---|
+| 📈 AL Sinyalleri | {s['buy_signals']} (doğruluk: %{s['buy_accuracy_pct']}) |
+| 📉 SAT Sinyalleri | {s['sell_signals']} (doğruluk: %{s['sell_accuracy_pct']}) |
+| {perf_emoji} Toplam Getiri | **{r['total_return_pct']:+.1f}%** |
+| 📊 Ort. Trade | {r['avg_return_per_trade']:+.2f}% |
+| 🏆 En İyi | {r['max_single_return']:+.2f}% |
+| 💀 En Kötü | {r['min_single_return']:+.2f}% |
+| 📈 Sharpe | {r['sharpe_ratio']} |
+| 📉 Max Drawdown | {r['max_drawdown_pct']:.1f}% |
+| 💪 Profit Factor | {r['profit_factor']} |
+
+### {vs_emoji} vs Buy & Hold
+| Strateji | Getiri |
+|---|---|
+| 📊 Sinyal | **{c['strategy_return']:+.1f}%** |
+| 🏠 Buy & Hold | {c['buy_hold_return']:+.1f}% |
+| 🆚 Fark | **{c['outperformance']:+.1f}%** |
+
+**Başlangıç:** ${result['initial_capital']:,.0f} → **Son:** ${result['final_capital']:,.0f}
+
+⚠️ *{result['disclaimer']}*"""
+    
+    return md, equity_chart, signal_chart, price_chart, result
 
 
-# ============================================================
-# TAB: ZAMANLI RAPORLAR
-# ============================================================
-def run_morning_report_now():
-    try:
-        from scheduler import generate_morning_report
-        msg = generate_morning_report()
-        return f"✅ Sabah raporu oluşturuldu ve bildirim kanallarına gönderildi.\n\n---\n\n{msg}"
-    except Exception as e:
-        return f"❌ Sabah raporu hatası: {e}"
+# ═══════════════════════════════════════════════════════
+# TAB 3: COMPARE — Multi-ticker comparison
+# ═══════════════════════════════════════════════════════
+
+def compare_tickers(tickers_str, portfolio_value, risk_tolerance):
+    """Compare 2-5 tickers side by side."""
+    if not tickers_str or not tickers_str.strip():
+        return "❌ En az 2 ticker girin (virgülle ayırın)", {}
+    
+    tickers = [t.strip().upper() for t in tickers_str.split(",") if t.strip()]
+    if len(tickers) < 2:
+        return "❌ En az 2 ticker gerekli", {}
+    if len(tickers) > 5:
+        return "❌ Max 5 ticker", {}
+    
+    results = {}
+    for t in tickers:
+        sig = generate_signal(t, portfolio_value, risk_tolerance.lower())
+        results[t] = sig
+    
+    # Build comparison table
+    md = f"## 🔄 Karşılaştırma: {', '.join(tickers)}\n\n"
+    md += "| Metrik | " + " | ".join(tickers) + " |\n"
+    md += "|---|" + "|".join(["---"] * len(tickers)) + "|\n"
+    
+    rows = [
+        ("Sinyal", lambda s: f"**{s['signal']}**"),
+        ("Güven", lambda s: f"%{s['confidence']}"),
+        ("Risk", lambda s: s['risk']),
+        ("Fiyat", lambda s: f"${s['price']:,.2f}"),
+        ("RSI", lambda s: f"{s['indicators']['rsi']['value']}"),
+        ("SMA Cross", lambda s: s['indicators']['sma_crossover']['signal']),
+        ("MACD", lambda s: s['indicators']['macd']['signal']),
+        ("Volatilite", lambda s: s['indicators']['volatility']['regime']),
+        ("R/R", lambda s: s['trade'].get('risk_reward', 'N/A')),
+    ]
+    
+    for label, fn in rows:
+        md += f"| {label} | " + " | ".join(fn(results[t]) for t in tickers) + " |\n"
+    
+    # Structured comparison JSON
+    comparison_json = {
+        t: {
+            "signal": results[t]["signal"],
+            "confidence": results[t]["confidence"] / 100,
+            "risk": results[t]["risk"],
+            "price": results[t]["price"],
+        }
+        for t in tickers
+    }
+    
+    md += "\n⚠️ *Yatırım tavsiyesi değildir.*"
+    
+    return md, comparison_json
 
 
-def run_closing_report_now():
-    try:
-        from scheduler import generate_closing_report
-        msg = generate_closing_report()
-        return f"✅ Kapanış raporu oluşturuldu ve bildirim kanallarına gönderildi.\n\n---\n\n{msg}"
-    except Exception as e:
-        return f"❌ Kapanış raporu hatası: {e}"
+# ═══════════════════════════════════════════════════════
+# TAB 4: EXPLAINABILITY — "Why does this trade make sense?"
+# ═══════════════════════════════════════════════════════
 
-
-# ============================================================
-# PAPER TRADING
-# ============================================================
-def run_paper_signal(ticker, portfolio_value, risk_tolerance):
-    if not ticker or not ticker.strip():
+def explain_trade(ticker, portfolio_value, risk_tolerance):
+    """Deep explainability: Why does this trade make sense?"""
+    ticker = ticker.strip().upper()
+    if not ticker:
         return "❌ Ticker girin"
-    try:
-        signal = generate_signal(ticker.strip().upper(), portfolio_value, risk_tolerance.lower())
-        return _format_signal_markdown(signal)
-    except Exception as e:
-        return f"❌ Sinyal hatası: {e}"
+    
+    signal = generate_signal(ticker, portfolio_value, risk_tolerance.lower())
+    
+    exp = signal.get("explainability", {})
+    votes = signal.get("votes", {})
+    reasons = signal.get("reasons", [])
+    trade = signal.get("trade", {})
+    indicators = signal.get("indicators", {})
+    
+    sig_tr = {"STRONG_BUY": "GÜÇLÜ AL", "BUY": "AL", "HOLD": "BEKLE",
+              "SELL": "SAT", "STRONG_SELL": "GÜÇLÜ SAT"}.get(signal["signal"], signal["signal"])
+    
+    md = f"""## 🧠 Explainability Report — {signal['ticker']}
 
+### Bu trade neden {'mantıklı' if signal['signal'] in ('BUY','STRONG_BUY','SELL','STRONG_SELL') else 'şu an yapılmamalı'}?
 
-def execute_paper_trade(ticker, portfolio_value, risk_tolerance):
-    if not ticker or not ticker.strip():
-        return "❌ Ticker girin", get_paper_summary()
-    try:
-        signal = generate_signal(ticker.strip().upper(), portfolio_value, risk_tolerance.lower())
-        pp = get_paper_portfolio(portfolio_value)
-        if signal["signal"] in ("BUY", "STRONG_BUY") and signal.get("shares", 0) > 0:
-            result = pp.open_position(signal["ticker"], signal["shares"], signal["entry_price"],
-                stop_loss=signal.get("stop_loss"), take_profit=signal.get("take_profit"), signal=signal["signal"])
-            md = _format_signal_markdown(signal)
-            md += f"\n\n### 📋 Paper Trade\n**Durum:** {result['status']}\n"
-            if result["status"] == "OPENED":
-                md += f"**Maliyet:** ${result['cost']:,.2f} | **Kalan nakit:** ${result['remaining_cash']:,.2f}\n"
-            elif result.get("violations"):
-                for v in result["violations"]:
-                    md += f"- ⚠️ {v}\n"
-            return md, get_paper_summary()
-        else:
-            md = _format_signal_markdown(signal)
-            md += f"\n\n📋 Sinyal {signal['signal']} — paper trade açılmadı."
-            return md, get_paper_summary()
-    except Exception as e:
-        return f"❌ {e}", get_paper_summary()
+**Tez:** {exp.get('thesis', 'N/A')}
 
+**Destekleyen kanıt:** {exp.get('supporting_evidence', 'N/A')}
 
-def get_paper_summary():
-    try:
-        pp = get_paper_portfolio()
-        s = pp.get_summary()
-        pnl_e = "🟢" if s['total_pnl'] >= 0 else "🔴"
-        md = f"## 💼 Paper Portföy\n\n**Nakit:** ${s['cash']:,.2f} | **Özkaynak:** ${s['equity']:,.2f} | **P&L:** {pnl_e} ${s['total_pnl']:+,.2f} ({s['total_pnl_pct']:+.1f}%)\n\n"
-        if s['positions']:
-            md += "| Ticker | Adet | Giriş | P&L | SL | TP |\n|---|---|---|---|---|---|\n"
-            for p in s['positions']:
-                pe = "🟢" if p['pnl_pct'] >= 0 else "🔴"
-                md += f"| **{p['ticker']}** | {p['shares']} | ${p['entry_price']:.2f} | {pe} {p['pnl_pct']:+.1f}% | {p.get('stop_loss', '-')} | {p.get('take_profit', '-')} |\n"
-        else:
-            md += "*Açık pozisyon yok.*\n"
-        if s['closed_trades'] > 0:
-            md += f"\n**Kapatılan:** {s['closed_trades']} | **Win rate:** {s['win_rate']}%\n"
-        return md
-    except Exception:
-        return "📋 Paper portföy henüz başlatılmadı."
+**Risk değerlendirmesi:** {exp.get('risk_assessment', 'N/A')}
 
+---
 
-def reset_paper():
-    reset_paper_portfolio(100000)
-    return "✅ Paper portföy sıfırlandı ($100,000)", get_paper_summary()
+### 📊 İndikatör Dökümü
 
+| İndikatör | Değer | Sinyal | Yön |
+|---|---|---|---|
+| RSI(14) | {indicators['rsi']['value']} | {indicators['rsi']['signal']} | {'🐂' if 'BULLISH' in indicators['rsi']['signal'] or indicators['rsi']['signal'] == 'OVERSOLD' else '🐻' if 'BEARISH' in indicators['rsi']['signal'] or indicators['rsi']['signal'] == 'OVERBOUGHT' else '➖'} |
+| SMA(20/50) | {indicators['sma_crossover']['sma20']}/{indicators['sma_crossover']['sma50']} | {indicators['sma_crossover']['signal']} | {'🐂' if 'BULLISH' in indicators['sma_crossover']['signal'] else '🐻' if 'BEARISH' in indicators['sma_crossover']['signal'] else '➖'} |
+| MACD(12,26,9) | {indicators['macd']['histogram']} | {indicators['macd']['signal']} | {'🐂' if 'BULLISH' in indicators['macd']['signal'] else '🐻' if 'BEARISH' in indicators['macd']['signal'] else '➖'} |
+| Bollinger(20,2) | — | {indicators['bollinger']['signal']} | {'🐂' if indicators['bollinger']['signal'] in ('BULLISH','OVERSOLD') else '🐻' if indicators['bollinger']['signal'] in ('BEARISH','OVERBOUGHT') else '➖'} |
+| Volatilite | {indicators['volatility']['annualized_pct']}% | {indicators['volatility']['regime']} | {'⚠️' if indicators['volatility']['regime'] in ('HIGH','EXTREME') else '✅'} |
 
-def _format_signal_markdown(sig):
-    s = sig.get("signal", "HOLD")
-    emoji = {"STRONG_BUY": "🟢🟢", "BUY": "🟢", "HOLD": "🟡", "SELL": "🔴", "STRONG_SELL": "🔴🔴"}.get(s, "🟡")
-    return f"""## {emoji} {sig.get('ticker', '?')} — {s}
+**Oylama:** {signal['bullish_count']} 🐂 boğa / {signal['bearish_count']} 🐻 ayı
 
-**Güven:** {sig.get('confidence', 0)}% | **Yöntem:** Kural tabanlı indikatör oyu (LLM değil)
+---
 
-| İndikatör | Değer | Sinyal |
-|---|---|---|
-| RSI(14) | {sig.get('rsi', 'N/A')} | {sig.get('rsi_signal', 'N/A')} |
-| MACD | {sig.get('macd', 'N/A')} | {sig.get('macd_trend', 'N/A')} |
-| SMA(20/50) | — | {sig.get('sma_signal', 'N/A')} |
-| Bollinger | — | {sig.get('bb_signal', 'N/A')} |
-| Volatilite | — | {sig.get('volatility_regime', 'N/A')} |
+### 📝 Karar Süreci (Kural Tabanlı)
 
-**Oy:** {sig.get('bullish_count', 0)} bullish / {sig.get('bearish_count', 0)} bearish
+1. RSI < 30 ve SMA20 > SMA50 → **AL** sinyali
+2. RSI > 70 ve SMA20 < SMA50 → **SAT** sinyali
+3. Extreme volatility → **AL sinyali filtrelenir** (HOLD'a düşer)
+4. 5 indikatörden 3+ aynı yönde → sinyal güçlenir
+
+**Sonuç:** {sig_tr} (Güven: %{signal['confidence']}, Risk: {signal['risk']})
+
+---
+
+### 💡 Nedenler
+
+"""
+    for i, r in enumerate(reasons, 1):
+        md += f"{i}. {r}\n"
+    
+    if signal["signal"] in ("BUY", "STRONG_BUY") and trade.get("entry_price"):
+        md += f"""
+---
+
+### 💰 Trade Detayları
 
 | | |
 |---|---|
-| Giriş | ${sig.get('entry_price', 0):,.2f} |
-| SL | ${sig.get('stop_loss') or 0:,.2f} |
-| TP | ${sig.get('take_profit') or 0:,.2f} |
-| Hisse | {sig.get('shares', 0)} |
-| R/R | {sig.get('risk_reward', 'N/A')} |
-
-⚠️ *Deterministic sinyal — LLM analizi ayrıdır. Yatırım tavsiyesi değildir.*
+| Giriş | **${trade['entry_price']:,.2f}** |
+| Stop-Loss | **${trade['stop_loss']:,.2f}** |
+| Take-Profit | **${trade['take_profit']:,.2f}** |
+| Pozisyon | **{trade['shares']}** hisse (${trade['position_value']:,.0f}) |
+| Risk/Ödül | **{trade['risk_reward']}** |
+| Portföy %si | **%{trade['position_pct']}** |
 """
-
-
-def run_health_check():
-    health = get_health()
-    st = "🟢" if health["status"] == "healthy" else "🟡"
-    md = f"## 🏥 Sistem Sağlığı — {st} {health['status']}\n\n| Bileşen | Durum |\n|---|---|\n"
-    for name, comp in health.get("components", {}).items():
-        cs = comp.get("status", "?")
-        ce = "🟢" if cs in ("up", "configured", "available") else ("🟡" if cs == "degraded" else "🔴")
-        md += f"| {name} | {ce} {cs} |\n"
+    
+    md += "\n⚠️ *Algoritmik sinyal — yatırım tavsiyesi değildir.*"
     return md
 
 
-# ============================================================
-# TAB: SOHBET
-# ============================================================
-def chat_analysis(message, history):
-    if not message or not message.strip():
-        return "Bir soru sorun."
-    try:
-        return str(get_advisor().run(message))
-    except Exception as e:
-        return f"❌ {e}"
+# ═══════════════════════════════════════════════════════
+# HELPER
+# ═══════════════════════════════════════════════════════
+
+def _empty_plot(message="No data"):
+    import plotly.graph_objects as go
+    fig = go.Figure()
+    fig.add_annotation(text=message, showarrow=False, font=dict(size=16, color="gray"))
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="#1e1e1e", plot_bgcolor="#1e1e1e",
+        height=300,
+    )
+    return fig
 
 
-# ============================================================
+# ═══════════════════════════════════════════════════════
 # GRADIO UI
-# ============================================================
-DESC = """
-# 🤖 Agentic Trade Bot Advisor v2.0
+# ═══════════════════════════════════════════════════════
 
-**12 AI Agent** • **LLM Council** • BIST + NASDAQ + Kripto + Altın/Gümüş + KAP + Makro
+HEADER = """# 🤖 Trade Bot Advisor v3.0 — Signal-First Architecture
 
-| Agent | Görev |
+| Bileşen | Rol |
 |---|---|
-| 📈 Technical | RSI, MACD, Bollinger, SMA, ATR, Stochastic |
-| 📰 Sentiment | FinBERT NLP + KAP + SEC Insider |
-| 📊 Fundamental | P/E, PEG, marjlar + CoinGecko kripto |
-| 🇹🇷 BIST Analyst | BIST30, bankalar, altın ₺, USD/TRY |
-| ⚠️ Risk Manager | VaR, pozisyon, SL/TP, opsiyon akışı |
-| 🌍 Macro Analyst | TCMB, Fed, yield curve, DXY |
-| 🐂 Bull Advisor | AL argümanlarını savunur |
-| 🐻 Bear Advisor | SAT argümanlarını savunur |
-| ⚖️ Mediator | Dengeyi kurar |
-| 🎯 Fund Manager | Council sentezler, final karar |
+| 📊 **Signal Engine** | Kural tabanlı indikatör oyu → sinyal üretir (RSI + SMA crossover + MACD + Bollinger + Volume) |
+| 🧠 **LLM Interpreter** | Sinyali Türkçe/İngilizce yorumlar — **asla sinyal üretmez** |
+| 📈 **Backtester** | Stratejiyi geçmiş veride test eder — Sharpe, drawdown, vs buy&hold |
+| 🛡️ **Volatility Filter** | Extreme volatilitede AL sinyallerini filtreler |
+| 🧾 **Structured Output** | Her sinyal JSON formatında: `{"signal": "BUY", "confidence": 0.62, ...}` |
 
-> ⚠️ Yatırım tavsiyesi değildir.
+> **LLM = yorumlayıcı**, sinyal motoru = karar verici. Demo her zaman çalışır (sample data fallback).
 """
 
-with gr.Blocks(title="🤖 Trade Bot Advisor v2.0") as demo:
-    gr.Markdown(DESC)
+TICKERS_HELP = """**Desteklenen:** 🇺🇸 AAPL, NVDA, MSFT | 🇹🇷 THYAO.IS, GARAN.IS | ₿ BTC-USD, ETH-USD | 🪙 GC=F (Altın)"""
+
+with gr.Blocks(title="🤖 Trade Bot Advisor v3.0") as demo:
+    gr.Markdown(HEADER)
+    
     with gr.Tabs():
-
-        # TAB 1: Dashboard
-        with gr.Tab("📊 Dashboard"):
-            gr.Markdown("### Günlük AL/SAT taraması — BIST + US + Emtia")
+        
+        # ════════════ TAB 1: QUICK ANALYSIS ════════════
+        with gr.Tab("📊 Analiz", id="analysis"):
+            gr.Markdown(f"### Tek hisse analizi — Sinyal + Grafikler + Yapılandırılmış Çıktı\n{TICKERS_HELP}")
+            
             with gr.Row():
                 with gr.Column(scale=1):
-                    dash_market = gr.Radio(label="🌍 Piyasa", choices=["BIST", "US", "Both"], value="Both")
-                    dash_portfolio = gr.Number(label="💰 Portföy ($)", value=100000, minimum=1000)
-                    dash_btn = gr.Button("📊 Dashboard Oluştur", variant="primary", size="lg")
-                with gr.Column(scale=2):
-                    dash_output = gr.Markdown(value="*Dashboard oluşturmak için butona tıklayın…*")
-            dash_btn.click(fn=run_daily_dashboard, inputs=[dash_market, dash_portfolio], outputs=dash_output)
-
-        # TAB 2: Hızlı Analiz
-        with gr.Tab("⚡ Hızlı Analiz"):
-            gr.Markdown("### Tek hisse detaylı analiz + LLM Council\n**BIST:** THYAO.IS, GARAN.IS | **US:** AAPL, NVDA | **Kripto:** BTC-USD | **Emtia:** GC=F")
-            with gr.Row():
-                with gr.Column(scale=1):
-                    ticker_input = gr.Textbox(label="📌 Ticker", placeholder="THYAO.IS, AAPL, BTC-USD…", value="THYAO.IS")
+                    ticker_input = gr.Textbox(label="📌 Ticker", value="AAPL", placeholder="AAPL, THYAO.IS, BTC-USD…")
                     portfolio_input = gr.Number(label="💰 Portföy ($)", value=100000, minimum=1000)
-                    risk_input = gr.Radio(label="⚖️ Risk", choices=["Conservative", "Moderate", "Aggressive"], value="Moderate")
-                    analyze_btn = gr.Button("🔍 Analiz", variant="primary", size="lg")
+                    risk_input = gr.Radio(label="⚖️ Risk Toleransı", choices=["Conservative", "Moderate", "Aggressive"], value="Moderate")
+                    analyze_btn = gr.Button("🔍 Analiz Et", variant="primary", size="lg")
+                    
+                    with gr.Row():
+                        signal_display = gr.Textbox(label="Sinyal", interactive=False)
+                        confidence_display = gr.Textbox(label="Güven", interactive=False)
+                    with gr.Row():
+                        risk_display = gr.Textbox(label="Risk", interactive=False)
+                        price_display = gr.Textbox(label="Fiyat", interactive=False)
+                
                 with gr.Column(scale=2):
-                    output = gr.Markdown(value="*Butona tıklayın…*")
-            analyze_btn.click(fn=quick_analysis_streaming, inputs=[ticker_input, portfolio_input, risk_input], outputs=output)
-
-        # TAB 3: Karşılaştırma
-        with gr.Tab("🔄 Karşılaştırma"):
-            gr.Markdown("### 2–5 ticker karşılaştırın")
+                    candlestick_plot = gr.Plot(label="📈 Fiyat Grafiği")
+                    indicator_plot = gr.Plot(label="📊 İndikatörler (RSI + MACD)")
+            
             with gr.Row():
                 with gr.Column(scale=1):
-                    cmp_in = gr.Textbox(label="📌 Ticker'lar", value="THYAO.IS, GARAN.IS, AKBNK.IS")
-                    cmp_pv = gr.Number(label="💰 Portföy ($)", value=100000, minimum=1000)
-                    cmp_rt = gr.Radio(label="⚖️ Risk", choices=["Conservative", "Moderate", "Aggressive"], value="Moderate")
-                    cmp_btn = gr.Button("🔄 Karşılaştır", variant="primary", size="lg")
-                with gr.Column(scale=2):
-                    cmp_out = gr.Markdown(value="*Butona tıklayın…*")
-            cmp_btn.click(fn=compare_tickers, inputs=[cmp_in, cmp_pv, cmp_rt], outputs=cmp_out)
-
-        # TAB 4: Backtest
-        with gr.Tab("📊 Backtest"):
-            gr.Markdown("### Sinyal doğruluk testi — geçmiş verilerde RSI+SMA stratejisi")
+                    gr.Markdown("### 🧾 Yapılandırılmış Çıktı (JSON)")
+                    signal_json = gr.JSON(label="Signal JSON")
+                with gr.Column(scale=1):
+                    gr.Markdown("### 🧠 Yorum")
+                    interpretation_md = gr.Markdown(value="*Analiz için butona tıklayın…*")
+            
+            analyze_btn.click(
+                fn=run_analysis,
+                inputs=[ticker_input, portfolio_input, risk_input],
+                outputs=[candlestick_plot, indicator_plot, signal_json, interpretation_md,
+                         signal_display, confidence_display, risk_display, price_display],
+            )
+        
+        # ════════════ TAB 2: BACKTEST ════════════
+        with gr.Tab("📊 Backtest", id="backtest"):
+            gr.Markdown("### 📊 Strateji Backtesti — Geçmiş verilerde sinyal doğruluğu\nAynı RSI + SMA crossover + volatility filter stratejisini geçmiş veride test edin.")
+            
             with gr.Row():
                 with gr.Column(scale=1):
                     bt_ticker = gr.Textbox(label="📌 Ticker", value="AAPL")
                     bt_period = gr.Slider(label="📅 Dönem (yıl)", minimum=0.5, maximum=5, step=0.5, value=1)
                     bt_holding = gr.Slider(label="⏱️ Tutma süresi (gün)", minimum=1, maximum=30, step=1, value=10)
-                    bt_rsi_buy = gr.Slider(label="📈 RSI Alım eşiği", minimum=20, maximum=50, step=5, value=35)
-                    bt_rsi_sell = gr.Slider(label="📉 RSI Satım eşiği", minimum=50, maximum=80, step=5, value=65)
-                    bt_sma = gr.Checkbox(label="SMA filtresi kullan", value=True)
+                    
+                    gr.Markdown("**RSI Eşikleri:**")
+                    bt_rsi_buy = gr.Slider(label="📈 RSI AL eşiği", minimum=15, maximum=45, step=1, value=35)
+                    bt_rsi_sell = gr.Slider(label="📉 RSI SAT eşiği", minimum=55, maximum=85, step=1, value=65)
+                    
+                    gr.Markdown("**Filtreler:**")
+                    bt_sma = gr.Checkbox(label="✅ SMA(20/50) crossover filtresi", value=True)
+                    bt_vol_filter = gr.Checkbox(label="✅ Volatility filtresi", value=True)
+                    bt_vol_threshold = gr.Slider(label="Volatilite eşiği", minimum=0.2, maximum=0.8, step=0.05, value=0.50)
+                    
                     bt_btn = gr.Button("📊 Backtest Çalıştır", variant="primary", size="lg")
-                with gr.Column(scale=2):
-                    bt_out = gr.Markdown(value="*Parametreleri ayarlayın ve butona tıklayın…*")
-            bt_btn.click(fn=run_backtest_ui, inputs=[bt_ticker, bt_period, bt_holding, bt_rsi_buy, bt_rsi_sell, bt_sma], outputs=bt_out)
-
-        # TAB 5: Portföy Optimizasyonu
-        with gr.Tab("📈 Portföy"):
-            gr.Markdown("### Markowitz Efficient Frontier — optimal portföy ağırlıkları")
-            with gr.Row():
-                with gr.Column(scale=1):
-                    po_tickers = gr.Textbox(label="📌 Varlıklar (virgülle)", value="AAPL, NVDA, MSFT, GOOGL, AMZN")
-                    po_period = gr.Radio(label="📅 Dönem", choices=["6mo", "1y", "2y"], value="1y")
-                    po_btn = gr.Button("📈 Optimize Et", variant="primary", size="lg")
-                with gr.Column(scale=2):
-                    po_out = gr.Markdown(value="*Varlıkları girin ve butona tıklayın…*")
-            po_btn.click(fn=run_portfolio_optimizer, inputs=[po_tickers, po_period], outputs=po_out)
-
-        # TAB 6: Sektör Korelasyon
-        with gr.Tab("🔗 Sektör Korelasyon"):
-            gr.Markdown("### BIST Sektör Korelasyon Matrisi — hangi sektörler birlikte hareket ediyor?")
-            with gr.Row():
-                with gr.Column(scale=1):
-                    sc_period = gr.Radio(label="📅 Dönem", choices=["3mo", "6mo", "1y", "2y"], value="6mo")
-                    sc_btn = gr.Button("🔗 Korelasyon Hesapla", variant="primary", size="lg")
-                with gr.Column(scale=2):
-                    sc_out = gr.Markdown(value="*Dönem seçin ve butona tıklayın…*")
-            sc_btn.click(fn=run_sector_correlation, inputs=[sc_period], outputs=sc_out)
-
-        # TAB 7: Zamanlı Raporlar
-        with gr.Tab("⏰ Zamanlı Raporlar"):
-            gr.Markdown("### Otomatik Sabah/Kapanış Raporları + Saatlik Alertler")
-            gr.Markdown("""
-**Aktif zamanlamalar:**
-- 🌅 **Sabah Raporu** — 09:30 (TR) — BIST açılış öncesi, KAP bildirimleri, makro takvim
-- 🌆 **Kapanış Raporu** — 18:30 (TR) — günün özeti, performans, yarın izlenecekler
-- ⏱️ **Saatlik Alert** — 10:00-18:00 (TR, hafta içi) — watchlist kontrolü
-
-Raporlar aktif bildirim kanallarına gönderilir (Telegram/Discord/WhatsApp).
-""")
-            with gr.Row():
-                with gr.Column():
-                    rpt_morning_btn = gr.Button("🌅 Sabah Raporunu Şimdi Oluştur", variant="primary")
-                    rpt_closing_btn = gr.Button("🌆 Kapanış Raporunu Şimdi Oluştur", variant="secondary")
-                with gr.Column():
-                    rpt_out = gr.Markdown(value="*Rapor burada gösterilecek…*")
-            rpt_morning_btn.click(fn=run_morning_report_now, inputs=[], outputs=rpt_out)
-            rpt_closing_btn.click(fn=run_closing_report_now, inputs=[], outputs=rpt_out)
-
-        # TAB 8: Watchlist
-        with gr.Tab("👁️ Watchlist"):
-            gr.Markdown("### Fiyat/RSI/VIX alertleri — otomatik bildirim")
-            with gr.Row():
-                with gr.Column(scale=1):
-                    wl_ticker = gr.Textbox(label="📌 Ticker", placeholder="THYAO.IS")
-                    wl_name = gr.Textbox(label="İsim (opsiyonel)", placeholder="THY")
-                    wl_type = gr.Dropdown(
-                        label="Alert Tipi",
-                        choices=["price_below", "price_above", "rsi_below", "rsi_above", "vix_above"],
-                        value="price_below",
-                    )
-                    wl_value = gr.Number(label="Alert Değeri", value=150)
-                    wl_channel = gr.Radio(label="Bildirim Kanalı", choices=["telegram", "email", "discord", "whatsapp"], value="telegram")
-                    wl_add_btn = gr.Button("➕ Ekle", variant="primary")
-                    gr.Markdown("---")
-                    wl_remove_id = gr.Number(label="Silinecek ID", value=0, precision=0)
-                    wl_remove_btn = gr.Button("🗑️ Sil", variant="secondary")
-                with gr.Column(scale=2):
-                    wl_status = gr.Markdown(value="")
-                    wl_display = gr.Markdown(value=get_watchlist_display())
-            wl_add_btn.click(fn=add_to_watchlist, inputs=[wl_ticker, wl_name, wl_type, wl_value, wl_channel], outputs=[wl_status, wl_display])
-            wl_remove_btn.click(fn=remove_from_watchlist, inputs=[wl_remove_id], outputs=[wl_status, wl_display])
-
-        # TAB 7: Geçmiş
-        with gr.Tab("📜 Geçmiş"):
-            gr.Markdown("### Analiz geçmişi + sinyal doğruluk takibi")
-            hist_ticker = gr.Textbox(label="Ticker Filtresi (boş=tümü)", placeholder="AAPL")
-            hist_btn = gr.Button("📜 Geçmişi Göster", variant="primary")
-            hist_out = gr.Markdown(value="*Butona tıklayın…*")
-            hist_btn.click(fn=get_history_display, inputs=[hist_ticker], outputs=hist_out)
-
-        # TAB 8: Telegram
-        # TAB: Paper Trading
-        with gr.Tab("📝 Paper Trade"):
-            gr.Markdown("### Paper Trading — Sanal Portföy ile Risk-Free Test\nSinyal **LLM değil**, kural tabanlı indikatör oylaması ile üretilir.")
-            with gr.Row():
-                with gr.Column(scale=1):
-                    pt_ticker = gr.Textbox(label="📌 Ticker", value="AAPL")
-                    pt_pv = gr.Number(label="💰 Portföy ($)", value=100000, minimum=1000)
-                    pt_rt = gr.Radio(label="⚖️ Risk", choices=["Conservative", "Moderate", "Aggressive"], value="Moderate")
-                    pt_signal_btn = gr.Button("📊 Sinyal Üret (Sadece Bak)", variant="secondary")
-                    pt_trade_btn = gr.Button("📝 Sinyal + Paper Trade Aç", variant="primary", size="lg")
-                    pt_reset_btn = gr.Button("🗑️ Portföyü Sıfırla", variant="stop")
-                with gr.Column(scale=2):
-                    pt_signal_out = gr.Markdown(value="*Ticker girin ve sinyal üretin…*")
-                    pt_portfolio_out = gr.Markdown(value=get_paper_summary())
-            pt_signal_btn.click(fn=run_paper_signal, inputs=[pt_ticker, pt_pv, pt_rt], outputs=pt_signal_out)
-            pt_trade_btn.click(fn=execute_paper_trade, inputs=[pt_ticker, pt_pv, pt_rt], outputs=[pt_signal_out, pt_portfolio_out])
-            pt_reset_btn.click(fn=reset_paper, outputs=[pt_signal_out, pt_portfolio_out])
-
-        # TAB: Health
-        with gr.Tab("🏥 Sistem"):
-            gr.Markdown("### Sistem Sağlığı ve Bileşen Durumu")
-            health_btn = gr.Button("🏥 Kontrol Et", variant="primary")
-            health_out = gr.Markdown(value="*Butona tıklayın…*")
-            health_btn.click(fn=run_health_check, outputs=health_out)
-
-        with gr.Tab("🔔 Telegram"):
-            gr.Markdown("### Analiz → Telegram\n@BotFather → /newbot → Token, bota mesaj → getUpdates → chat_id")
-            with gr.Row():
-                with gr.Column():
-                    tg_t = gr.Textbox(label="🤖 Token", type="password")
-                    tg_c = gr.Textbox(label="💬 Chat ID")
-                    tg_tk = gr.Textbox(label="📌 Ticker", value="THYAO.IS")
-                    tg_pv = gr.Number(label="💰 Portföy ($)", value=100000)
-                    tg_rt = gr.Radio(label="⚖️ Risk", choices=["Conservative", "Moderate", "Aggressive"], value="Moderate")
-                    tg_btn = gr.Button("📤 Gönder", variant="primary")
-                with gr.Column():
-                    tg_out = gr.Markdown(value="*Bilgileri doldurun…*")
-            tg_btn.click(fn=send_telegram_alert, inputs=[tg_t, tg_c, tg_tk, tg_pv, tg_rt], outputs=tg_out)
-
-        # TAB 9: Sohbet
-        with gr.Tab("💬 Sohbet"):
-            gr.Markdown("Doğal dilde soru sorun — Türkçe veya İngilizce.")
-            gr.ChatInterface(
-                fn=chat_analysis,
-                type="messages",
                 
-                examples=[
-                    "THYAO hissesini analiz et, portföyüm 500K TL, orta risk",
-                    "Bugün BIST'te hangi hisseleri almalıyım?",
-                    "Altın fiyatı ne kadar? Almalı mıyım?",
-                    "Compare NVDA and AMD",
-                    "Bitcoin temel analizi yap — developer activity nasıl?",
-                    "AAPL için insider trading aktivitesi nasıl?",
-                    "Türkiye ve ABD makro durumu nedir?",
-                ],
+                with gr.Column(scale=2):
+                    bt_summary = gr.Markdown(value="*Parametreleri ayarlayın ve Backtest Çalıştır'a tıklayın…*")
+                    bt_equity = gr.Plot(label="💰 Equity Curve")
+                    bt_signals = gr.Plot(label="📍 Sinyal Haritası")
+                    bt_price = gr.Plot(label="📈 Fiyat Grafiği")
+                    bt_json = gr.JSON(label="📋 Detaylı Sonuçlar (JSON)")
+            
+            bt_btn.click(
+                fn=run_backtest_ui,
+                inputs=[bt_ticker, bt_period, bt_holding, bt_rsi_buy, bt_rsi_sell,
+                        bt_sma, bt_vol_filter, bt_vol_threshold],
+                outputs=[bt_summary, bt_equity, bt_signals, bt_price, bt_json],
             )
-
-        # TAB 10: Rehber
+        
+        # ════════════ TAB 3: COMPARE ════════════
+        with gr.Tab("🔄 Karşılaştırma", id="compare"):
+            gr.Markdown("### 2–5 ticker karşılaştırma\nVirgülle ayırın: `AAPL, NVDA, MSFT`")
+            
+            with gr.Row():
+                with gr.Column(scale=1):
+                    cmp_tickers = gr.Textbox(label="📌 Ticker'lar", value="AAPL, NVDA, MSFT")
+                    cmp_portfolio = gr.Number(label="💰 Portföy ($)", value=100000, minimum=1000)
+                    cmp_risk = gr.Radio(label="⚖️ Risk", choices=["Conservative", "Moderate", "Aggressive"], value="Moderate")
+                    cmp_btn = gr.Button("🔄 Karşılaştır", variant="primary", size="lg")
+                with gr.Column(scale=2):
+                    cmp_md = gr.Markdown(value="*Ticker'ları girin ve karşılaştırın…*")
+                    cmp_json = gr.JSON(label="Karşılaştırma JSON")
+            
+            cmp_btn.click(
+                fn=compare_tickers,
+                inputs=[cmp_tickers, cmp_portfolio, cmp_risk],
+                outputs=[cmp_md, cmp_json],
+            )
+        
+        # ════════════ TAB 4: EXPLAINABILITY ════════════
+        with gr.Tab("🧠 Explainability", id="explain"):
+            gr.Markdown("### Bu trade neden mantıklı?\nHer sinyalin arkasındaki mantığı detaylı görün.")
+            
+            with gr.Row():
+                with gr.Column(scale=1):
+                    exp_ticker = gr.Textbox(label="📌 Ticker", value="AAPL")
+                    exp_portfolio = gr.Number(label="💰 Portföy ($)", value=100000, minimum=1000)
+                    exp_risk = gr.Radio(label="⚖️ Risk", choices=["Conservative", "Moderate", "Aggressive"], value="Moderate")
+                    exp_btn = gr.Button("🧠 Açıkla", variant="primary", size="lg")
+                with gr.Column(scale=2):
+                    exp_md = gr.Markdown(value="*Ticker girin ve Açıkla'ya tıklayın…*")
+            
+            exp_btn.click(
+                fn=explain_trade,
+                inputs=[exp_ticker, exp_portfolio, exp_risk],
+                outputs=exp_md,
+            )
+        
+        # ════════════ TAB 5: REHBER ════════════
         with gr.Tab("📖 Rehber"):
             gr.Markdown("""
-# 📖 Kullanım Rehberi v2.0
+# 📖 Trade Bot Advisor v3.0 — Rehber
+
+## Mimari: Signal-First
+
+```
+Kullanıcı → Ticker girer
+              ↓
+         Signal Engine (kural tabanlı)
+         ├── RSI(14) — momentum
+         ├── SMA(20/50) crossover — trend
+         ├── MACD(12,26,9) — momentum değişimi
+         ├── Bollinger Bands(20,2) — fiyat bandı
+         ├── Volume analizi — hacim onayı
+         └── Volatility filter — extreme filtreleme
+              ↓
+         5 indikatör oyu → BUY/SELL/HOLD
+              ↓
+         Structured JSON output
+              ↓
+         LLM Interpreter (opsiyonel)
+         └── Sinyali Türkçe/İngilizce yorumlar
+              ↓
+         Backtest ile doğrulama
+```
+
+## Sinyal Kuralları
+
+| Koşul | Sinyal |
+|---|---|
+| RSI < 30 + SMA20 > SMA50 | **STRONG_BUY** |
+| RSI < 35 + SMA20 > SMA50 | **BUY** |
+| RSI > 70 + SMA20 < SMA50 | **STRONG_SELL** |
+| RSI > 65 + SMA20 < SMA50 | **SELL** |
+| Extreme volatility + BUY | → **HOLD** (filtre) |
+| 4+/5 bullish | Sinyal güçlenir |
 
 ## Desteklenen Varlıklar
 
 | Tür | Format | Örnekler |
 |---|---|---|
-| 🇹🇷 BIST | `TICKER.IS` | THYAO.IS, GARAN.IS, AKBNK.IS |
 | 🇺🇸 US/NASDAQ | `TICKER` | AAPL, NVDA, MSFT, TSLA |
+| 🇹🇷 BIST | `TICKER.IS` | THYAO.IS, GARAN.IS, AKBNK.IS |
 | ₿ Kripto | `TICKER-USD` | BTC-USD, ETH-USD, SOL-USD |
-| 🪙 Emtia | Futures | GC=F (Altın), SI=F (Gümüş), CL=F (Petrol) |
-| 📦 ETF | `TICKER` | SPY, QQQ, IWM |
-| 💱 Döviz | `XXX=X` | USDTRY=X, EURTRY=X |
+| 🪙 Emtia | Futures | GC=F (Altın), SI=F (Gümüş) |
 
-## v2.0 Yenilikler
+## v3.0 vs v2.0
 
-| Özellik | Açıklama |
-|---|---|
-| 🧠 **FinBERT Sentiment** | Keyword yerine NLP — %85+ doğruluk |
-| 🏛️ **LLM Council** | Bull + Bear tartışması + Mediator hakem |
-| 📊 **Backtest** | Geçmiş verilerde sinyal doğruluğu test |
-| 📈 **Portföy Optimizer** | Markowitz efficient frontier |
-| 👁️ **Watchlist** | Otomatik fiyat/RSI/VIX alertleri |
-| 📜 **Analiz Geçmişi** | Her analiz kaydedilir, 7/30 gün sonra doğruluk kontrol |
-| ₿ **Kripto Temel** | CoinGecko — market cap, dev activity, community |
-| 🕵️ **Insider Trades** | SEC EDGAR Form 4 — içeriden işlemler |
-| 📊 **Options Flow** | Put/Call ratio, unusual volume tespiti |
-| 🌍 **Macro Analyst** | TCMB, Fed, yield curve, DXY |
-| 🗄️ **Caching** | API çağrıları cache'lenir (15dk-24saat TTL) |
-| ⚡ **Dual Model** | Data agent'lar hızlı model, Council derin model |
+| | v2.0 | v3.0 |
+|---|---|---|
+| Sinyal kaynağı | LLM council | Kural tabanlı motor |
+| Output | Serbest metin | Yapılandırılmış JSON |
+| Backtest | Basit | Equity curve + signal map |
+| Explainability | Yok | Tam dökümanlı |
+| Demo reliability | API'ye bağımlı | Sample data fallback |
+| LLM rolü | Karar verici | Sadece yorumlayıcı |
 
-## Dashboard Sinyalleri
-- AL: RSI < 40 + SMA20 > SMA50 (yükselen trend + oversold)
-- SAT: RSI > 65 + SMA20 < SMA50 (düşen trend + overbought)
+## Structured Output Formatı
 
-## CLI Kullanımı
-```bash
-git clone https://huggingface.co/spaces/SutskeverFanBoy/trade-bot-advisor
-cd trade-bot-advisor && pip install -r requirements.txt
-export HF_TOKEN="hf_xxx"
-python cli.py THYAO.IS GARAN.IS --portfolio 500000 --risk moderate
-python cli.py NVDA AAPL --quiet --telegram --bot-token "..." --chat-id "..." --alert-only
+```json
+{
+  "signal": "BUY",
+  "confidence": 0.62,
+  "reason": "RSI oversold at 28.5 — potential bounce opportunity",
+  "risk": "medium",
+  "indicators": {
+    "rsi": 28.5,
+    "rsi_signal": "OVERSOLD",
+    "sma_crossover": "BULLISH",
+    "macd": "BULLISH_CROSSOVER",
+    "bollinger": "OVERSOLD",
+    "volatility": "MODERATE"
+  },
+  "trade": {
+    "entry_price": 230.50,
+    "stop_loss": 222.40,
+    "take_profit": 242.65,
+    "shares": 25,
+    "risk_reward": "1:1.5"
+  }
+}
 ```
 
-## Ortam Değişkenleri
-
-| Değişken | Açıklama | Zorunlu |
-|---|---|---|
-| `HF_TOKEN` | HuggingFace API token | ✅ |
-| `MODEL_ID` | Varsayılan LLM model ID | ❌ (default: Qwen/Qwen2.5-72B-Instruct) |
-| `FAST_MODEL_ID` | Data agent'lar için hızlı model | ❌ (örn: Qwen/Qwen2.5-7B-Instruct) |
-| `DEEP_MODEL_ID` | Council + FM için derin model | ❌ (örn: Qwen/Qwen2.5-72B-Instruct) |
-| `TELEGRAM_BOT_TOKEN` | Telegram bot token | ❌ |
-| `TELEGRAM_CHAT_ID` | Telegram chat ID | ❌ |
-| `DISCORD_WEBHOOK_URL` | Discord webhook URL | ❌ |
+⚠️ **DISCLAIMER:** Bu sistem eğitim ve araştırma amaçlıdır. Yatırım tavsiyesi değildir.
 """)
+    
+    gr.Markdown("---\n**v3.0** | Signal Engine + Backtester + Structured Output + Explainability | ⚠️ Yatırım tavsiyesi değildir")
 
-    gr.Markdown("---\n🤗 smolagents + yfinance + pandas-ta + FinBERT + CoinGecko + KAP + SEC EDGAR | ⚠️ Yatırım tavsiyesi değildir")
 
 if __name__ == "__main__":
     demo.queue(max_size=10).launch(
