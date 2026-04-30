@@ -1,99 +1,114 @@
 """
-📡 Data Ingestion — Binance REST + yfinance fallback
-======================================================
-Unified data interface. Tries Binance public API for crypto,
-yfinance for everything else. No API keys needed.
-Returns standardized OHLCV DataFrame.
+📡 Data Ingestion — yfinance + Binance REST + sample fallback
+================================================================
+Unified data interface. Always returns valid data: live > fallback.
+Space NEVER crashes — sample data guarantees functionality.
 """
 
-import json
 import logging
 import datetime
 import numpy as np
+import pandas as pd
 
 logger = logging.getLogger("trade_bot.data")
+
+# ─────── Sample Data for Demo Mode (ALWAYS available) ───────
+
+def _generate_sample_ohlcv(ticker: str, days: int = 200) -> pd.DataFrame:
+    """Generate realistic synthetic OHLCV data for demo/fallback."""
+    np.random.seed(hash(ticker) % 2**31)
+    
+    base_prices = {
+        "AAPL": 230.0, "NVDA": 135.0, "MSFT": 420.0, "GOOGL": 175.0,
+        "TSLA": 285.0, "AMZN": 200.0, "META": 550.0,
+        "THYAO.IS": 340.0, "GARAN.IS": 145.0, "AKBNK.IS": 72.0,
+        "BTC-USD": 94500.0, "ETH-USD": 3200.0, "SOL-USD": 180.0,
+        "GC=F": 3320.0, "SI=F": 30.0,
+    }
+    base = base_prices.get(ticker.upper(), 100.0)
+    
+    dates = pd.date_range(end=datetime.date.today(), periods=days, freq='B')
+    
+    # Random walk with slight upward drift
+    returns = np.random.normal(0.0005, 0.018, days)
+    prices = base * np.cumprod(1 + returns)
+    
+    # Generate OHLCV
+    highs = prices * (1 + np.abs(np.random.normal(0, 0.01, days)))
+    lows = prices * (1 - np.abs(np.random.normal(0, 0.01, days)))
+    opens = lows + (highs - lows) * np.random.random(days)
+    volumes = np.random.randint(1_000_000, 50_000_000, days).astype(float)
+    
+    df = pd.DataFrame({
+        'Open': opens, 'High': highs, 'Low': lows,
+        'Close': prices, 'Volume': volumes,
+    }, index=dates)
+    
+    return df
 
 
 def fetch_ohlcv(ticker: str, period: str = "3mo", interval: str = "1d") -> dict:
     """
-    Unified OHLCV fetch. Routes crypto to Binance, everything else to yfinance.
-    Returns dict with 'df' (DataFrame or None), 'source', 'error'.
+    Unified OHLCV fetch. Tries live data first, falls back to sample data.
+    NEVER returns None df — always has valid data for the Space to work.
     """
     ticker = ticker.strip().upper()
-
-    # Route crypto to Binance
+    
+    # Try live data first
     if _is_crypto(ticker):
         result = _fetch_binance(ticker, period, interval)
-        if result["df"] is not None:
+        if result["df"] is not None and len(result["df"]) >= 26:
             return result
-        # Binance failed → fallback to yfinance
-        logger.warning(f"Binance failed for {ticker}, falling back to yfinance")
-
-    return _fetch_yfinance(ticker, period, interval)
+    
+    result = _fetch_yfinance(ticker, period, interval)
+    if result["df"] is not None and len(result["df"]) >= 26:
+        return result
+    
+    # Fallback to sample data
+    logger.warning(f"Live data unavailable for {ticker}, using sample data")
+    period_days = {"1d": 1, "5d": 5, "1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "2y": 730}.get(period, 90)
+    df = _generate_sample_ohlcv(ticker, max(period_days, 200))
+    return {"df": df, "source": "sample_data", "error": None, "note": "Demo/sample data — live data unavailable"}
 
 
 def _is_crypto(ticker: str) -> bool:
-    """Check if ticker is a crypto pair."""
     crypto_suffixes = ["-USD", "-USDT", "-BTC", "-EUR"]
-    crypto_tickers = {"BTC", "ETH", "SOL", "ADA", "DOGE", "XRP", "DOT", "AVAX",
-                      "MATIC", "LINK", "UNI", "ATOM", "LTC", "BNB", "TON", "SUI"}
+    crypto_tickers = {"BTC", "ETH", "SOL", "ADA", "DOGE", "XRP", "DOT", "AVAX", "LINK", "BNB"}
     base = ticker.split("-")[0]
     return any(ticker.endswith(s) for s in crypto_suffixes) or base in crypto_tickers
 
 
 def _fetch_binance(ticker: str, period: str, interval: str) -> dict:
-    """Fetch from Binance public REST API (no key needed)."""
-    import requests
-
-    # Map ticker to Binance symbol
-    binance_map = {
-        "BTC-USD": "BTCUSDT", "ETH-USD": "ETHUSDT", "SOL-USD": "SOLUSDT",
-        "ADA-USD": "ADAUSDT", "DOGE-USD": "DOGEUSDT", "XRP-USD": "XRPUSDT",
-        "DOT-USD": "DOTUSDT", "AVAX-USD": "AVAXUSDT", "LINK-USD": "LINKUSDT",
-        "BNB-USD": "BNBUSDT", "TON-USD": "TONUSDT", "SUI-USD": "SUIUSDT",
-        "LTC-USD": "LTCUSDT", "UNI-USD": "UNIUSDT",
-    }
-    symbol = binance_map.get(ticker, ticker.replace("-USD", "USDT").replace("-", ""))
-
-    # Map intervals
-    interval_map = {"1d": "1d", "1h": "1h", "4h": "4h", "1wk": "1w", "1mo": "1M",
-                     "15m": "15m", "5m": "5m", "1m": "1m"}
-    bi = interval_map.get(interval, "1d")
-
-    # Map period to limit
-    period_limits = {"1d": 1, "5d": 5, "1mo": 30, "3mo": 90, "6mo": 180,
-                      "1y": 365, "2y": 730}
-    limit = period_limits.get(period, 90)
-
     try:
-        url = "https://api.binance.com/api/v3/klines"
-        params = {"symbol": symbol, "interval": bi, "limit": min(limit, 1000)}
-        resp = requests.get(url, params=params, timeout=10)
+        import requests
+        binance_map = {
+            "BTC-USD": "BTCUSDT", "ETH-USD": "ETHUSDT", "SOL-USD": "SOLUSDT",
+            "ADA-USD": "ADAUSDT", "DOGE-USD": "DOGEUSDT", "XRP-USD": "XRPUSDT",
+            "DOT-USD": "DOTUSDT", "AVAX-USD": "AVAXUSDT", "LINK-USD": "LINKUSDT",
+            "BNB-USD": "BNBUSDT",
+        }
+        symbol = binance_map.get(ticker, ticker.replace("-USD", "USDT").replace("-", ""))
+        bi = {"1d": "1d", "1h": "1h", "4h": "4h", "1wk": "1w"}.get(interval, "1d")
+        limit = {"1d": 1, "5d": 5, "1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "2y": 730}.get(period, 90)
+        
+        resp = requests.get("https://api.binance.com/api/v3/klines",
+                          params={"symbol": symbol, "interval": bi, "limit": min(limit, 1000)}, timeout=10)
         if not resp.ok:
-            return {"df": None, "source": "binance", "error": f"Binance HTTP {resp.status_code}"}
-
+            return {"df": None, "source": "binance", "error": f"HTTP {resp.status_code}"}
+        
         data = resp.json()
-        if not data or not isinstance(data, list):
+        if not data:
             return {"df": None, "source": "binance", "error": "Empty response"}
-
-        import pandas as pd
-        rows = []
-        for k in data:
-            rows.append({
-                "Date": pd.Timestamp(k[0], unit="ms"),
-                "Open": float(k[1]), "High": float(k[2]),
-                "Low": float(k[3]), "Close": float(k[4]),
-                "Volume": float(k[5]),
-            })
+        
+        rows = [{"Date": pd.Timestamp(k[0], unit="ms"), "Open": float(k[1]), "High": float(k[2]),
+                 "Low": float(k[3]), "Close": float(k[4]), "Volume": float(k[5])} for k in data]
         df = pd.DataFrame(rows).set_index("Date")
-        return {"df": df, "source": "binance", "error": None, "symbol": symbol}
-
+        return {"df": df, "source": "binance", "error": None}
     except Exception as e:
         return {"df": None, "source": "binance", "error": str(e)}
 
 
 def _fetch_yfinance(ticker: str, period: str, interval: str) -> dict:
-    """Fetch from yfinance."""
     try:
         import yfinance as yf
         stock = yf.Ticker(ticker)
@@ -105,34 +120,16 @@ def _fetch_yfinance(ticker: str, period: str, interval: str) -> dict:
         return {"df": None, "source": "yfinance", "error": str(e)}
 
 
-# ─────── Fallback static data for demo mode ───────
+# ─────── Fallback info for display ───────
 
-FALLBACK_DATA = {
-    "AAPL": {"price": 230.50, "change_pct": 1.2, "rsi": 55.3, "signal": "HOLD", "name": "Apple Inc"},
-    "NVDA": {"price": 135.80, "change_pct": 2.5, "rsi": 62.1, "signal": "BUY", "name": "NVIDIA"},
-    "MSFT": {"price": 420.30, "change_pct": -0.3, "rsi": 48.7, "signal": "HOLD", "name": "Microsoft"},
-    "GOOGL": {"price": 175.60, "change_pct": 0.8, "rsi": 51.2, "signal": "HOLD", "name": "Alphabet"},
-    "TSLA": {"price": 285.40, "change_pct": -1.5, "rsi": 42.8, "signal": "HOLD", "name": "Tesla"},
-    "THYAO.IS": {"price": 340.20, "change_pct": 0.9, "rsi": 58.4, "signal": "HOLD", "name": "THY"},
-    "GARAN.IS": {"price": 145.60, "change_pct": 1.1, "rsi": 53.2, "signal": "HOLD", "name": "Garanti"},
-    "AKBNK.IS": {"price": 72.30, "change_pct": 0.5, "rsi": 49.8, "signal": "HOLD", "name": "Akbank"},
-    "BTC-USD": {"price": 94500.0, "change_pct": 3.1, "rsi": 65.4, "signal": "BUY", "name": "Bitcoin"},
-    "ETH-USD": {"price": 3200.0, "change_pct": 2.8, "rsi": 61.2, "signal": "BUY", "name": "Ethereum"},
-    "GC=F": {"price": 3320.0, "change_pct": 0.4, "rsi": 54.1, "signal": "HOLD", "name": "Gold"},
+TICKER_NAMES = {
+    "AAPL": "Apple Inc", "NVDA": "NVIDIA Corp", "MSFT": "Microsoft",
+    "GOOGL": "Alphabet", "TSLA": "Tesla", "AMZN": "Amazon", "META": "Meta",
+    "THYAO.IS": "Türk Hava Yolları", "GARAN.IS": "Garanti Bankası",
+    "AKBNK.IS": "Akbank", "BTC-USD": "Bitcoin", "ETH-USD": "Ethereum",
+    "SOL-USD": "Solana", "GC=F": "Gold Futures", "SI=F": "Silver Futures",
 }
 
 
-def get_fallback(ticker: str) -> dict:
-    """Return static fallback data for demo mode when APIs are down."""
-    ticker = ticker.strip().upper()
-    if ticker in FALLBACK_DATA:
-        data = FALLBACK_DATA[ticker].copy()
-        data["ticker"] = ticker
-        data["source"] = "fallback"
-        data["note"] = "Statik demo verisi — gerçek zamanlı veri alınamadı"
-        return data
-    return {
-        "ticker": ticker, "price": 100.0, "change_pct": 0.0,
-        "rsi": 50.0, "signal": "HOLD", "name": ticker,
-        "source": "fallback", "note": "Bilinmeyen ticker — varsayılan veri",
-    }
+def get_ticker_name(ticker: str) -> str:
+    return TICKER_NAMES.get(ticker.upper(), ticker.upper())
