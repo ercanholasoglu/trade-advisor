@@ -31,6 +31,9 @@ from core.portfolio import (
     get_portfolio, reset_portfolio, run_multi_ticker_simulation,
 )
 from core.evaluator import run_ground_truth_evaluation
+from core.agents import run_multi_agent_analysis
+from core.optimizer import compute_indicator_accuracy, optimize_for_tickers
+from core.reasoning import generate_advanced_reasoning
 
 
 # ═══════════════════════════════════════════════════════
@@ -536,6 +539,147 @@ def run_ground_truth_ui(tickers_str, period_years, horizon_5, horizon_10, horizo
 
 
 # ═══════════════════════════════════════════════════════
+# TAB: MULTI-AGENT SYSTEM
+# ═══════════════════════════════════════════════════════
+
+def run_multi_agent_ui(ticker, portfolio_value, risk_tolerance, w_analyst, w_sentiment, w_risk):
+    """Run 4-agent analysis with custom weights."""
+    ticker = ticker.strip().upper()
+    if not ticker:
+        return "Ticker girin", {}
+    weights = {"Analyst": w_analyst, "Sentiment": w_sentiment, "Risk": w_risk}
+    total = sum(weights.values())
+    if total > 0:
+        weights = {k: v/total for k, v in weights.items()}
+    result = run_multi_agent_analysis(ticker, portfolio_value, risk_tolerance.lower(), weights=weights)
+    d = result["decision"]
+    agents = result["agents"]
+
+    se = {"STRONG_BUY":"🟢🟢","BUY":"🟢","HOLD":"🟡","SELL":"🔴","STRONG_SELL":"🔴🔴"}.get(d["signal"],"⚪")
+    md = f"## 🤖 Multi-Agent Karar: {se} **{d['signal']}** ({d['confidence']}%)\n"
+    md += f"**Konsensus:** {d['consensus']} | **Risk Kararı:** {d['risk_verdict']} | **Skor:** {d['weighted_score']}\n"
+    if d.get("override"):
+        md += f"\n⚠️ **Override:** {d['override']}\n"
+
+    md += "\n---\n### 🏛 Ajan Raporları\n\n| Ajan | Sinyal | Güven | Ağırlık | Katkı | Ana Neden |\n|---|---|---|---|---|---|\n"
+    for a in d["agent_summaries"]:
+        ae = "🟢" if a["signal"]=="BULLISH" else ("🔴" if a["signal"]=="BEARISH" else "🟡")
+        md += f"| **{a['agent']}** | {ae} {a['signal']} | %{a['confidence']} | {a['weight']:.0%} | {a['contribution']:+.3f} | {a['top_reason'][:60]} |\n"
+
+    for name, report in agents.items():
+        icon = {"analyst":"📈","sentiment":"📰","risk":"⚠️"}.get(name,"🔹")
+        md += f"\n#### {icon} {report['agent']}\n**Sinyal:** {report['signal']} ({report['confidence']}%)\n\n"
+        for i, r in enumerate(report["reasoning"][:4], 1):
+            md += f"{i}. {r}\n"
+
+    md += "\n---\n### 🔗 Akıl Yürütme Zinciri\n\n"
+    for line in d["reasoning_chain"]:
+        md += f"- {line}\n"
+    md += "\n⚠️ *Yatırım tavsiyesi değildir.*"
+    return md, result
+
+
+# ═══════════════════════════════════════════════════════
+# TAB: STRATEGY OPTIMIZER
+# ═══════════════════════════════════════════════════════
+
+def run_optimizer_ui(tickers_str, period_years):
+    """Run dynamic strategy optimization."""
+    if not tickers_str or not tickers_str.strip():
+        return "Ticker girin", _empty_plot("No data"), {}
+    tickers = [t.strip().upper() for t in tickers_str.split(",") if t.strip()]
+
+    import plotly.graph_objects as go
+
+    if len(tickers) == 1:
+        result = compute_indicator_accuracy(tickers[0], period_years)
+        if "error" in result:
+            return f"Hata: {result['error']}", _empty_plot("Error"), result
+        ranking = result["ranking"]
+        opt_w = result["optimized_weights"]
+        def_w = result["default_weights"]
+    else:
+        result = optimize_for_tickers(tickers, period_years)
+        if "error" in result:
+            return f"Hata: {result['error']}", _empty_plot("Error"), result
+        ranking = [{"indicator": k, "accuracy": v, "samples": "multi"} for k, v in result["average_accuracy"].items()]
+        ranking.sort(key=lambda x: x["accuracy"], reverse=True)
+        opt_w = result["average_weights"]
+        def_w = {"RSI":0.2,"SMA":0.2,"MACD":0.2,"Bollinger":0.2,"Volume":0.2}
+
+    md = f"## ⚙️ Dinamik Strateji Optimizasyonu\n\n"
+    md += f"**Ticker:** {', '.join(tickers)} | **Dönem:** {period_years} yıl\n\n"
+    md += "### İndikatör Performans Sıralaması\n\n| # | İndikatör | Doğruluk | Varsayılan Ağırlık | Optimize Ağırlık | Değişim |\n|---|---|---|---|---|---|\n"
+    for i, r in enumerate(ranking, 1):
+        name = r["indicator"]
+        acc = r["accuracy"]
+        dw = def_w.get(name, 0.2)
+        ow = opt_w.get(name, 0.2)
+        change = ow - dw
+        ae = "🟢" if acc >= 55 else ("🟡" if acc >= 48 else "🔴")
+        ce = "⬆️" if change > 0.02 else ("⬇️" if change < -0.02 else "➡️")
+        md += f"| {i} | **{name}** | {ae} %{acc} | {dw:.0%} | **{ow:.0%}** | {ce} {change:+.0%} |\n"
+
+    md += f"\n### Sonuç\n"
+    best = ranking[0] if ranking else {"indicator":"?","accuracy":0}
+    worst = ranking[-1] if ranking else {"indicator":"?","accuracy":0}
+    md += f"- **En iyi:** {best['indicator']} (%{best['accuracy']} doğruluk) → ağırlık artırıldı\n"
+    md += f"- **En kötü:** {worst['indicator']} (%{worst['accuracy']} doğruluk) → ağırlık azaltıldı\n"
+    md += f"- Optimizasyon ground truth verisine dayanır — geçmiş {period_years} yıl analiz edildi\n"
+    md += "\n⚠️ *Geçmiş performans gelecek sonuçları garanti etmez.*"
+
+    # Chart: default vs optimized weights
+    names = list(opt_w.keys())
+    fig = go.Figure(data=[
+        go.Bar(name='Varsayılan', x=names, y=[def_w.get(n,0.2)*100 for n in names], marker_color='#607D8B'),
+        go.Bar(name='Optimize', x=names, y=[opt_w.get(n,0.2)*100 for n in names], marker_color='#03DAC6'),
+    ])
+    fig.update_layout(barmode='group', title="⚖️ İndikatör Ağırlıkları: Varsayılan vs Optimize",
+                      height=350, template="plotly_dark", paper_bgcolor="#1e1e1e", plot_bgcolor="#1e1e1e",
+                      font=dict(color="#e0e0e0"), yaxis_title="Ağırlık %",
+                      margin=dict(l=50,r=20,t=60,b=30))
+    return md, fig, result
+
+
+# ═══════════════════════════════════════════════════════
+# TAB: ADVANCED REASONING
+# ═══════════════════════════════════════════════════════
+
+def run_reasoning_ui(ticker):
+    """Run advanced contextual reasoning."""
+    ticker = ticker.strip().upper()
+    if not ticker:
+        return "Ticker girin", {}
+    result = generate_advanced_reasoning(ticker)
+    if "error" in result:
+        return f"Hata: {result['error']}", result
+
+    syn = result["synthesis"]
+    se = {"STRONG_BUY":"🟢🟢","BUY":"🟢","HOLD":"🟡","SELL":"🔴","STRONG_SELL":"🔴🔴"}.get(result["signal"],"⚪")
+    ve = {"STRENGTHENED":"💪","WEAKENED":"⚠️","CONFIRMED":"✅"}.get(syn["verdict"],"🔹")
+
+    md = f"## 🧠 Gelişmiş Akıl Yürütme — {ticker}\n\n"
+    md += f"### {se} Sinyal: **{result['signal']}** | {ve} Güven: **{syn['original_confidence']}% → {syn['adjusted_confidence']}%** ({syn['confidence_change']:+d})\n\n"
+    md += f"**Sentez:** {syn['verdict']} — {syn['narrative']}\n\n"
+
+    md += "---\n### 📋 Kontekstüel Analizler\n\n"
+    for a in result["analyses"]:
+        md += f"#### {a['icon']} {a['category']}: **{a['finding']}**\n"
+        md += f"{a['detail']}\n\n"
+        md += f"**Etki:** {a['impact']}\n\n"
+
+    md += f"---\n### 📊 Özet\n"
+    md += f"| | |\n|---|---|\n"
+    md += f"| Boğa Faktörleri | {syn['bullish_factors']} |\n"
+    md += f"| Ayı Faktörleri | {syn['bearish_factors']} |\n"
+    md += f"| Uyarılar | {syn['warnings_count']} |\n"
+    md += f"| Güven Değişimi | {syn['confidence_change']:+d}% |\n"
+    md += "\n⚠️ *Yatırım tavsiyesi değildir.*"
+    return md, result
+
+
+
+# ═══════════════════════════════════════════════════════
 # HELPER
 # ═══════════════════════════════════════════════════════
 
@@ -677,6 +821,43 @@ with gr.Blocks(title="🤖 Trade Bot Advisor v3.5") as demo:
             gt_json = gr.JSON(label="📋 Sonuçlar")
             gt_btn.click(run_ground_truth_ui, [gt_tickers, gt_period, gt_h5, gt_h10, gt_h20],
                         [gt_md, gt_acc, gt_scatter, gt_json])
+
+
+        with gr.Tab("🤖 Multi-Agent"):
+            gr.Markdown("### 4 Ajan Sistemi: Analist + Sentiment + Risk + Orchestrator\nHer ajan bağımsız analiz yapar, Orchestrator sentezler.")
+            with gr.Row():
+                with gr.Column(scale=1):
+                    ma_t=gr.Textbox(label="Ticker",value="AAPL"); ma_p=gr.Number(label="Portfoy ($)",value=100000,minimum=1000)
+                    ma_r=gr.Radio(label="Risk",choices=["Conservative","Moderate","Aggressive"],value="Moderate")
+                    gr.Markdown("**Ajan Agirliklari:**")
+                    ma_wa=gr.Slider(label="Analist",minimum=0.1,maximum=1.0,step=0.05,value=0.50)
+                    ma_ws=gr.Slider(label="Sentiment",minimum=0.0,maximum=1.0,step=0.05,value=0.25)
+                    ma_wr=gr.Slider(label="Risk",minimum=0.0,maximum=1.0,step=0.05,value=0.25)
+                    ma_btn=gr.Button("🤖 Multi-Agent Analiz",variant="primary",size="lg")
+                with gr.Column(scale=2):
+                    ma_md=gr.Markdown(value="*Girin...*"); ma_json=gr.JSON(label="Detay")
+            ma_btn.click(run_multi_agent_ui,[ma_t,ma_p,ma_r,ma_wa,ma_ws,ma_wr],[ma_md,ma_json])
+
+        with gr.Tab("⚙️ Optimizer"):
+            gr.Markdown("### Dinamik Strateji Optimizasyonu\nGround truth'a dayanarak hangi indikator daha basarili? Agirliklari otomatik ayarla.")
+            with gr.Row():
+                with gr.Column(scale=1):
+                    op_t=gr.Textbox(label="Ticker(lar)",value="AAPL, NVDA, MSFT")
+                    op_p=gr.Slider(label="Donem (yil)",minimum=0.5,maximum=5,step=0.5,value=2)
+                    op_btn=gr.Button("⚙️ Optimize Et",variant="primary",size="lg")
+                with gr.Column(scale=2):
+                    op_md=gr.Markdown(value="*Girin...*"); op_fig=gr.Plot(label="Agirliklar"); op_json=gr.JSON(label="Detay")
+            op_btn.click(run_optimizer_ui,[op_t,op_p],[op_md,op_fig,op_json])
+
+        with gr.Tab("🧠 Reasoning"):
+            gr.Markdown("### Gelismis Akil Yurutme\nLikidite tuzagi? Piyasa rejimi? Makro baglam? Teknik + dis faktorler birlestirilir.")
+            with gr.Row():
+                with gr.Column(scale=1):
+                    re_t=gr.Textbox(label="Ticker",value="AAPL")
+                    re_btn=gr.Button("🧠 Derin Analiz",variant="primary",size="lg")
+                with gr.Column(scale=2):
+                    re_md=gr.Markdown(value="*Girin...*"); re_json=gr.JSON(label="Detay")
+            re_btn.click(run_reasoning_ui,[re_t],[re_md,re_json])
 
         with gr.Tab("📖 Rehber"):
             gr.Markdown("""# 📖 Rehber
