@@ -30,6 +30,7 @@ from core.llm_interpreter import interpret_signal, _template_interpret
 from core.portfolio import (
     get_portfolio, reset_portfolio, run_multi_ticker_simulation,
 )
+from core.evaluator import run_ground_truth_evaluation
 
 
 # ═══════════════════════════════════════════════════════
@@ -366,6 +367,175 @@ def _build_positions_md(portfolio):
 
 
 # ═══════════════════════════════════════════════════════
+# TAB: GROUND TRUTH — Model ne dedi? Gerçek ne oldu?
+# ═══════════════════════════════════════════════════════
+
+def run_ground_truth_ui(tickers_str, period_years, horizon_5, horizon_10, horizon_20):
+    """Run ground truth evaluation: compare predictions vs actual outcomes."""
+    if not tickers_str or not tickers_str.strip():
+        ef = _empty_plot("Ticker girin")
+        return "❌ Ticker girin", ef, ef, {}
+
+    tickers = [t.strip().upper() for t in tickers_str.split(",") if t.strip()]
+    horizons = []
+    if horizon_5: horizons.append(5)
+    if horizon_10: horizons.append(10)
+    if horizon_20: horizons.append(20)
+    if not horizons: horizons = [10]
+
+    import plotly.graph_objects as go
+
+    all_evals = []
+    ticker_results = []
+
+    for ticker in tickers:
+        r = run_ground_truth_evaluation(ticker, period_years=period_years, eval_horizons=horizons)
+        if "error" in r:
+            ticker_results.append({"ticker": ticker, "error": r["error"]})
+            continue
+        ticker_results.append(r)
+        for ev in r["evaluations"]:
+            ev["ticker"] = ticker
+            all_evals.append(ev)
+
+    if not all_evals:
+        ef = _empty_plot("Sinyal bulunamadı")
+        return "❌ Hiç sinyal bulunamadı — dönem veya parametreleri değiştirin.", ef, ef, {}
+
+    # Pick primary horizon for display
+    prim = f"{horizons[len(horizons)//2]}d"
+
+    # ── Build the main table: Model ne dedi? Gerçek ne oldu? ──
+    md = "## 🎯 Ground Truth Evaluation\n### Model ne dedi? Gerçek ne oldu?\n\n"
+
+    # Aggregate stats per horizon
+    for h in horizons:
+        hk = f"{h}d"
+        total = sum(1 for e in all_evals if hk in e["outcomes"])
+        correct = sum(1 for e in all_evals if hk in e["outcomes"] and e["outcomes"][hk]["correct"])
+        acc = correct / total * 100 if total else 0
+        dir_rets = []
+        for e in all_evals:
+            if hk not in e["outcomes"]: continue
+            chg = e["outcomes"][hk]["change_pct"]
+            dir_rets.append(chg if e["signal"] == "BUY" else -chg)
+        avg_dir = float(np.mean(dir_rets)) if dir_rets else 0
+        ae = "🟢" if acc >= 60 else ("🟡" if acc >= 50 else "🔴")
+        md += f"**{h} gün horizonu:** {ae} **%{acc:.1f}** doğruluk ({correct}/{total}) | Ort. yönlü getiri: **{avg_dir:+.2f}%**\n\n"
+
+    # Per-ticker breakdown
+    md += "---\n### Ticker Bazında\n\n"
+    for tr in ticker_results:
+        if "error" in tr:
+            md += f"**{tr['ticker']}**: ❌ {tr['error']}\n\n"
+            continue
+        md += f"**{tr['ticker']}** ({tr['total_evaluations']} sinyal, kaynak: {tr['data_source']})\n\n"
+        md += "| Horizon | Doğruluk | AL Doğ | SAT Doğ | Ort. Yönlü Getiri |\n|---|---|---|---|---|\n"
+        for hk, hs in tr["horizon_stats"].items():
+            ae = "🟢" if hs["accuracy_pct"] >= 60 else ("🟡" if hs["accuracy_pct"] >= 50 else "🔴")
+            md += f"| {hk} | {ae} %{hs['accuracy_pct']} | %{hs['buy_accuracy_pct']} | %{hs['sell_accuracy_pct']} | {hs['avg_directional_return_pct']:+.2f}% |\n"
+        cal = tr.get("calibration", {})
+        if cal.get("high_conviction_signals", 0) > 0:
+            md += f"\n*Kalibrasyon ({cal['reference_horizon']}): Yüksek kanaat %{cal['high_conviction_accuracy']}, Düşük kanaat %{cal['low_conviction_accuracy']}*\n"
+        md += "\n"
+
+    # ── Detailed signals table (last 30) ──
+    all_evals.sort(key=lambda x: x["date"])
+    show = all_evals[-30:]
+
+    md += f"---\n### Son {len(show)} Sinyal — Tahmin vs Gerçek\n\n"
+    md += "| Tarih | Ticker | Model Dedi | Fiyat | RSI |"
+    for h in horizons:
+        md += f" {h}G Gerçek | {h}G Sonuç |"
+    md += "\n|---|---|---|---|---|"
+    for _ in horizons:
+        md += "---|---|"
+    md += "\n"
+
+    for e in show:
+        se = "🟢 AL" if e["signal"] == "BUY" else "🔴 SAT"
+        row = f"| {e['date']} | {e['ticker']} | **{se}** | ${e['price']:,.2f} | {e['rsi']:.0f} |"
+        for h in horizons:
+            hk = f"{h}d"
+            o = e["outcomes"].get(hk, {})
+            if o:
+                chg = o["change_pct"]
+                emoji = "✅" if o["correct"] else "❌"
+                row += f" {chg:+.1f}% ({o['direction']}) | {emoji} |"
+            else:
+                row += " — | — |"
+        md += row + "\n"
+
+    md += "\n⚠️ *Geçmiş performans gelecek sonuçları garanti etmez.*"
+
+    # ── Charts ──
+    # 1. Accuracy per horizon bar chart
+    acc_data = []
+    for h in horizons:
+        hk = f"{h}d"
+        t = sum(1 for e in all_evals if hk in e["outcomes"])
+        c = sum(1 for e in all_evals if hk in e["outcomes"] and e["outcomes"][hk]["correct"])
+        acc_data.append({"horizon": f"{h} gün", "accuracy": c / t * 100 if t else 0})
+
+    acc_fig = go.Figure(data=[go.Bar(
+        x=[a["horizon"] for a in acc_data],
+        y=[a["accuracy"] for a in acc_data],
+        marker_color=["#26a69a" if a["accuracy"] >= 55 else "#ef5350" for a in acc_data],
+        text=[f"%{a['accuracy']:.1f}" for a in acc_data],
+        textposition="outside",
+    )])
+    acc_fig.add_hline(y=50, line_dash="dash", line_color="gray", opacity=0.5, annotation_text="Coin flip (50%)")
+    acc_fig.update_layout(title="🎯 Doğruluk vs Horizon", height=300, template="plotly_dark",
+                          paper_bgcolor="#1e1e1e", plot_bgcolor="#1e1e1e", font=dict(color="#e0e0e0"),
+                          yaxis_title="Doğruluk %", yaxis_range=[0, 100],
+                          margin=dict(l=50, r=20, t=60, b=30))
+
+    # 2. Scatter: prediction outcome per signal (using primary horizon)
+    buy_evals = [e for e in all_evals if e["signal"] == "BUY" and prim in e["outcomes"]]
+    sell_evals = [e for e in all_evals if e["signal"] == "SELL" and prim in e["outcomes"]]
+
+    scatter_fig = go.Figure()
+    if buy_evals:
+        scatter_fig.add_trace(go.Scatter(
+            x=[e["rsi"] for e in buy_evals],
+            y=[e["outcomes"][prim]["change_pct"] for e in buy_evals],
+            mode="markers",
+            marker=dict(size=8, color=["#26a69a" if e["outcomes"][prim]["correct"] else "#ef5350" for e in buy_evals],
+                        symbol="triangle-up", line=dict(width=1, color="white")),
+            name="BUY",
+            text=[f"{e['ticker']} {e['date']}<br>Fiyat: ${e['price']}<br>{prim}: {e['outcomes'][prim]['change_pct']:+.1f}%<br>{'✅' if e['outcomes'][prim]['correct'] else '❌'}" for e in buy_evals],
+            hoverinfo="text",
+        ))
+    if sell_evals:
+        scatter_fig.add_trace(go.Scatter(
+            x=[e["rsi"] for e in sell_evals],
+            y=[e["outcomes"][prim]["change_pct"] for e in sell_evals],
+            mode="markers",
+            marker=dict(size=8, color=["#26a69a" if e["outcomes"][prim]["correct"] else "#ef5350" for e in sell_evals],
+                        symbol="triangle-down", line=dict(width=1, color="white")),
+            name="SELL",
+            text=[f"{e['ticker']} {e['date']}<br>Fiyat: ${e['price']}<br>{prim}: {e['outcomes'][prim]['change_pct']:+.1f}%<br>{'✅' if e['outcomes'][prim]['correct'] else '❌'}" for e in sell_evals],
+            hoverinfo="text",
+        ))
+    scatter_fig.add_hline(y=0, line_color="gray", opacity=0.3)
+    scatter_fig.update_layout(title=f"📊 RSI vs Gerçek Getiri ({prim})", height=350, template="plotly_dark",
+                              paper_bgcolor="#1e1e1e", plot_bgcolor="#1e1e1e", font=dict(color="#e0e0e0"),
+                              xaxis_title="RSI (sinyal anında)", yaxis_title=f"Gerçek {prim} getiri %",
+                              margin=dict(l=50, r=20, t=60, b=40))
+
+    # JSON output
+    out_json = {
+        "tickers": [tr["ticker"] if "ticker" in tr else tr.get("ticker","?") for tr in ticker_results],
+        "horizons": horizons,
+        "total_signals": len(all_evals),
+        "horizon_accuracy": {f"{h}d": round(sum(1 for e in all_evals if f"{h}d" in e["outcomes"] and e["outcomes"][f"{h}d"]["correct"]) / max(1, sum(1 for e in all_evals if f"{h}d" in e["outcomes"])) * 100, 1) for h in horizons},
+    }
+
+    return md, acc_fig, scatter_fig, out_json
+
+
+
+# ═══════════════════════════════════════════════════════
 # HELPER
 # ═══════════════════════════════════════════════════════
 
@@ -487,6 +657,27 @@ with gr.Blocks(title="🤖 Trade Bot Advisor v3.5") as demo:
             pss.click(get_portfolio_status,outputs=[psm,pse,pspnl,pspos])
             psx.click(reset_portfolio_ui,outputs=[psm,pse,pspnl,pspos])
 
+
+        with gr.Tab("🎯 Ground Truth"):
+            gr.Markdown("### 🎯 Model ne dedi? Gerçek ne oldu?\nGeçmiş sinyalleri gerçek fiyat hareketleriyle karşılaştır. Her sinyal için 5/10/20 gün sonra fiyat ne yaptı?")
+            with gr.Row():
+                with gr.Column(scale=1):
+                    gt_tickers = gr.Textbox(label="Ticker(lar)", value="AAPL, NVDA, MSFT")
+                    gt_period = gr.Slider(label="Dönem (yıl)", minimum=0.5, maximum=5, step=0.5, value=2)
+                    gr.Markdown("**Değerlendirme horizonları:**")
+                    gt_h5 = gr.Checkbox(label="5 gün", value=True)
+                    gt_h10 = gr.Checkbox(label="10 gün", value=True)
+                    gt_h20 = gr.Checkbox(label="20 gün", value=True)
+                    gt_btn = gr.Button("🎯 Ground Truth Analizi", variant="primary", size="lg")
+                with gr.Column(scale=2):
+                    gt_md = gr.Markdown(value="*Ticker girin ve çalıştırın…*")
+            with gr.Row():
+                gt_acc = gr.Plot(label="🎯 Doğruluk vs Horizon")
+                gt_scatter = gr.Plot(label="📊 RSI vs Gerçek Getiri")
+            gt_json = gr.JSON(label="📋 Sonuçlar")
+            gt_btn.click(run_ground_truth_ui, [gt_tickers, gt_period, gt_h5, gt_h10, gt_h20],
+                        [gt_md, gt_acc, gt_scatter, gt_json])
+
         with gr.Tab("📖 Rehber"):
             gr.Markdown("""# 📖 Rehber
 
@@ -512,12 +703,13 @@ RSI(14) + SMA(20/50) crossover + MACD(12,26,9) + Bollinger(20,2) + Volume → 5 
 5. **AI Decision** — Tam pipeline
 6. **Evaluation** — Dashboard + drawdown
 7. **Portföy Sim** — Stateful tracking
-8. **Rehber** — Bu sayfa
+8. **Ground Truth** — Model ne dedi? Gerçek ne oldu?
+9. **Rehber** — Bu sayfa
 
 ⚠️ Yatırım tavsiyesi değildir.
 """)
 
-    gr.Markdown("---\n**v3.5** | Signal Engine + AI Decision + Evaluation + Portfolio Sim | ⚠️ Yatırım tavsiyesi değildir")
+    gr.Markdown("---\n**v3.5** | Signal Engine + AI Decision + Evaluation + Portfolio Sim + **Ground Truth** | ⚠️ Yatırım tavsiyesi değildir")
 
 if __name__ == "__main__":
     demo.queue(max_size=10).launch(
