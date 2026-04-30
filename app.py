@@ -29,8 +29,13 @@ from core.data_ingest import fetch_ohlcv, get_ticker_name
 from core.charts import (
     build_candlestick_chart, build_indicator_panel,
     build_equity_curve, build_backtest_signals_chart,
+    build_portfolio_equity_chart, build_pnl_distribution_chart,
+    build_drawdown_chart,
 )
 from core.llm_interpreter import interpret_signal, _template_interpret
+from core.portfolio import (
+    get_portfolio, reset_portfolio, run_multi_ticker_simulation,
+)
 
 
 # ═══════════════════════════════════════════════════════
@@ -323,6 +328,334 @@ def explain_trade(ticker, portfolio_value, risk_tolerance):
 
 
 # ═══════════════════════════════════════════════════════
+# TAB: AI TRADE DECISION — signal → explanation → backtest → execute
+# ═══════════════════════════════════════════════════════
+
+def run_ai_trade_decision(tickers_str, portfolio_value, risk_tolerance):
+    """Full AI Trade Decision pipeline: multi-ticker scan → signal → backtest → portfolio."""
+    if not tickers_str or not tickers_str.strip():
+        return "❌ Ticker girin", _empty_plot("No data"), {}
+
+    tickers = [t.strip().upper() for t in tickers_str.split(",") if t.strip()]
+    if not tickers:
+        return "❌ Ticker girin", _empty_plot("No data"), {}
+
+    result = run_multi_ticker_simulation(tickers, portfolio_value, risk_tolerance.lower())
+    decisions = result["decisions"]
+    metrics = result["portfolio_metrics"]
+
+    # Build decisions table
+    md = "## 🤖 AI Trade Decisions\n\n"
+    md += "| Ticker | Sinyal | Güven | Risk | Fiyat | BT Doğruluk | BT Sharpe | Aksiyon |\n"
+    md += "|---|---|---|---|---|---|---|---|\n"
+
+    for d in decisions:
+        sig_e = {"STRONG_BUY": "🟢🟢", "BUY": "🟢", "HOLD": "🟡", "SELL": "🔴", "STRONG_SELL": "🔴🔴"}.get(d["signal"], "⚪")
+        action = d["execution"].get("action", "NONE")
+        act_e = "✅" if action == "OPENED" else ("🔒" if action == "CLOSED" else "➖")
+        md += f"| **{d['ticker']}** | {sig_e} {d['signal']} | %{d['confidence']} | {d['risk']} | ${d['price']:,.2f} | %{d['backtest_accuracy']:.0f} | {d['backtest_sharpe']:.1f} | {act_e} {action} |\n"
+
+    md += f"\n---\n### 💼 Portföy Durumu\n"
+    md += f"| | |\n|---|---|\n"
+    pnl_e = "🟢" if metrics["total_pnl"] >= 0 else "🔴"
+    md += f"| 💰 Nakit | **${metrics['cash']:,.2f}** |\n"
+    md += f"| 📊 Toplam Değer | **${metrics['equity']:,.2f}** |\n"
+    md += f"| {pnl_e} P&L | **${metrics['total_pnl']:+,.2f}** ({metrics['total_pnl_pct']:+.1f}%) |\n"
+    md += f"| 📈 Açık Pozisyon | **{metrics['open_positions']}** |\n"
+    md += f"| 🔄 Toplam Trade | **{metrics['total_trades']}** |\n"
+    md += f"| 🎯 Win Rate | **%{metrics['win_rate']}** |\n"
+    md += f"| 📉 Max Drawdown | **{metrics['max_drawdown_pct']}%** |\n"
+
+    # Explanation per decision
+    md += "\n---\n### 🧠 Kararların Açıklaması\n\n"
+    for d in decisions:
+        sig_e = {"STRONG_BUY": "🟢🟢", "BUY": "🟢", "HOLD": "🟡", "SELL": "🔴", "STRONG_SELL": "🔴🔴"}.get(d["signal"], "⚪")
+        md += f"**{sig_e} {d['ticker']}** — {d['signal']} (%{d['confidence']} güven)\n"
+        md += f"- Neden: {d['reason']}\n"
+        md += f"- İndikatörler: RSI={d['indicators']['rsi']:.1f}, SMA={d['indicators']['sma']}, MACD={d['indicators']['macd']}, Vol={d['indicators']['volatility']}\n"
+        md += f"- Backtest: %{d['backtest_accuracy']:.0f} doğruluk, Sharpe {d['backtest_sharpe']:.2f}\n"
+        act = d["execution"]
+        if act.get("action") == "OPENED":
+            md += f"- ✅ Pozisyon açıldı: {act['shares']} hisse @ ${act['price']:,.2f} (maliyet: ${act['cost']:,.2f})\n"
+        elif act.get("action") == "CLOSED":
+            md += f"- 🔒 Pozisyon kapatıldı: PnL ${act.get('pnl',0):+,.2f}\n"
+        else:
+            md += f"- ➖ İşlem yok: {act.get('reason', 'N/A')}\n"
+        md += "\n"
+
+    md += "⚠️ *Yatırım tavsiyesi değildir.*"
+
+    # Portfolio chart
+    portfolio = get_portfolio()
+    port_chart = build_portfolio_equity_chart(portfolio.equity_snapshots)
+
+    return md, port_chart, result
+
+
+# ═══════════════════════════════════════════════════════
+# TAB: EVALUATION DASHBOARD — son 50 sinyal, başarı oranı, PnL, drawdown
+# ═══════════════════════════════════════════════════════
+
+def run_evaluation_dashboard(tickers_str, period_years):
+    """
+    Run backtests on multiple tickers and build a comprehensive evaluation dashboard.
+    Shows: last 50 signals, accuracy, PnL, drawdown.
+    """
+    if not tickers_str or not tickers_str.strip():
+        ef = _empty_plot("Ticker girin")
+        return "❌ Ticker girin", ef, ef, ef, {}
+
+    tickers = [t.strip().upper() for t in tickers_str.split(",") if t.strip()]
+    if not tickers:
+        ef = _empty_plot("Ticker girin")
+        return "❌ Ticker girin", ef, ef, ef, {}
+
+    all_signals = []
+    combined_equity = [100000.0]
+    capital = 100000.0
+    ticker_stats = []
+
+    for ticker in tickers:
+        bt = run_backtest(ticker, period_years=period_years, holding_days=10)
+        if "error" in bt:
+            ticker_stats.append({"ticker": ticker, "error": bt["error"]})
+            continue
+
+        # Collect signals
+        for s in bt["signals"]:
+            s["ticker"] = ticker
+            all_signals.append(s)
+
+        # Track combined equity
+        for s in bt["signals"]:
+            pnl = capital * 0.02 * (s["return_pct"] / 100)
+            capital += pnl
+            combined_equity.append(capital)
+
+        ticker_stats.append({
+            "ticker": ticker,
+            "signals": bt["summary"]["total_signals"],
+            "accuracy": bt["summary"]["accuracy_pct"],
+            "return": bt["returns"]["total_return_pct"],
+            "sharpe": bt["returns"]["sharpe_ratio"],
+            "max_dd": bt["returns"]["max_drawdown_pct"],
+            "profit_factor": bt["returns"]["profit_factor"],
+            "buy_acc": bt["summary"]["buy_accuracy_pct"],
+            "sell_acc": bt["summary"]["sell_accuracy_pct"],
+        })
+
+    # Sort by date, take last 50
+    all_signals.sort(key=lambda x: x["date"])
+    last_50 = all_signals[-50:]
+
+    # Stats
+    total = len(all_signals)
+    correct = sum(1 for s in all_signals if s["correct"])
+    accuracy = correct / total * 100 if total else 0
+    total_pnl_pct = (capital - 100000) / 100000 * 100
+
+    # Drawdown
+    eq = np.array(combined_equity)
+    peak = np.maximum.accumulate(eq)
+    dd = (eq - peak) / peak * 100
+    max_dd = float(np.min(dd)) if len(dd) > 0 else 0
+
+    acc_e = "🟢" if accuracy >= 60 else ("🟡" if accuracy >= 50 else "🔴")
+    pnl_e = "🟢" if total_pnl_pct > 0 else "🔴"
+
+    # Build markdown
+    md = f"## 📊 Evaluation Dashboard\n\n"
+    md += f"### {acc_e} Genel Başarı: **%{accuracy:.1f}** ({correct}/{total} sinyal)\n"
+    md += f"### {pnl_e} Toplam PnL: **{total_pnl_pct:+.1f}%** | Max Drawdown: **{max_dd:.1f}%**\n\n"
+
+    # Per-ticker table
+    md += "### Ticker Bazında Sonuçlar\n\n"
+    md += "| Ticker | Sinyaller | Doğruluk | Getiri | Sharpe | Max DD | PF |\n"
+    md += "|---|---|---|---|---|---|---|\n"
+    for ts in ticker_stats:
+        if "error" in ts:
+            md += f"| {ts['ticker']} | ❌ | — | — | — | — | — |\n"
+        else:
+            a_e = "🟢" if ts["accuracy"] >= 60 else ("🟡" if ts["accuracy"] >= 50 else "🔴")
+            md += f"| **{ts['ticker']}** | {ts['signals']} | {a_e} %{ts['accuracy']} | {ts['return']:+.1f}% | {ts['sharpe']} | {ts['max_dd']:.1f}% | {ts['profit_factor']} |\n"
+
+    # Last 50 signals table
+    md += f"\n### Son {len(last_50)} Sinyal\n\n"
+    md += "| Tarih | Ticker | Sinyal | Giriş | Çıkış | Getiri | RSI | Sonuç |\n"
+    md += "|---|---|---|---|---|---|---|---|\n"
+    for s in last_50[-20:]:  # Show last 20 in table for readability
+        sig_e = "📈" if s["signal"] == "BUY" else "📉"
+        res_e = "✅" if s["correct"] else "❌"
+        md += f"| {s['date']} | {s['ticker']} | {sig_e} {s['signal']} | ${s['entry_price']} | ${s['exit_price']} | {s['return_pct']:+.1f}% | {s['rsi']:.0f} | {res_e} |\n"
+
+    if len(last_50) > 20:
+        md += f"\n*... ve {len(last_50) - 20} sinyal daha*\n"
+
+    md += "\n⚠️ *Geçmiş performans gelecek sonuçları garanti etmez.*"
+
+    # Build charts
+    # 1. Equity curve
+    import plotly.graph_objects as go
+    eq_fig = go.Figure()
+    eq_fig.add_trace(go.Scatter(
+        y=combined_equity, mode='lines',
+        line=dict(color="#03DAC6" if capital >= 100000 else "#ef5350", width=2),
+        fill='tozeroy', fillcolor='rgba(3,218,198,0.08)',
+    ))
+    eq_fig.add_hline(y=100000, line_dash="dash", line_color="gray", opacity=0.4)
+    eq_fig.update_layout(
+        title=f"💰 Birleşik Equity Curve — {total_pnl_pct:+.1f}%",
+        height=300, template="plotly_dark",
+        paper_bgcolor="#1e1e1e", plot_bgcolor="#1e1e1e",
+        font=dict(color="#e0e0e0"), yaxis_title="$",
+        margin=dict(l=50, r=20, t=60, b=30),
+    )
+
+    # 2. Drawdown
+    dd_fig = go.Figure()
+    dd_fig.add_trace(go.Scatter(
+        y=dd, mode='lines', fill='tozeroy',
+        line=dict(color="#ef5350", width=1.5),
+        fillcolor='rgba(239,83,80,0.15)',
+    ))
+    dd_fig.update_layout(
+        title=f"📉 Drawdown — Max: {max_dd:.1f}%",
+        height=250, template="plotly_dark",
+        paper_bgcolor="#1e1e1e", plot_bgcolor="#1e1e1e",
+        font=dict(color="#e0e0e0"), yaxis_title="%",
+        margin=dict(l=50, r=20, t=60, b=30),
+    )
+
+    # 3. Signal distribution
+    buy_correct = sum(1 for s in all_signals if s["signal"] == "BUY" and s["correct"])
+    buy_wrong = sum(1 for s in all_signals if s["signal"] == "BUY" and not s["correct"])
+    sell_correct = sum(1 for s in all_signals if s["signal"] == "SELL" and s["correct"])
+    sell_wrong = sum(1 for s in all_signals if s["signal"] == "SELL" and not s["correct"])
+
+    dist_fig = go.Figure(data=[
+        go.Bar(name='Doğru', x=['BUY', 'SELL'], y=[buy_correct, sell_correct], marker_color='#26a69a'),
+        go.Bar(name='Yanlış', x=['BUY', 'SELL'], y=[buy_wrong, sell_wrong], marker_color='#ef5350'),
+    ])
+    dist_fig.update_layout(
+        barmode='stack', title="📊 Sinyal Dağılımı",
+        height=250, template="plotly_dark",
+        paper_bgcolor="#1e1e1e", plot_bgcolor="#1e1e1e",
+        font=dict(color="#e0e0e0"),
+        margin=dict(l=50, r=20, t=60, b=30),
+    )
+
+    eval_json = {
+        "total_signals": total,
+        "accuracy_pct": round(accuracy, 1),
+        "total_pnl_pct": round(total_pnl_pct, 1),
+        "max_drawdown_pct": round(max_dd, 1),
+        "tickers": ticker_stats,
+        "last_50_signals": last_50,
+    }
+
+    return md, eq_fig, dd_fig, dist_fig, eval_json
+
+
+# ═══════════════════════════════════════════════════════
+# TAB: PORTFOLIO SIMULATION — stateful tracking
+# ═══════════════════════════════════════════════════════
+
+def run_portfolio_action(ticker, portfolio_value, risk_tolerance):
+    """Generate signal and execute in portfolio."""
+    ticker = ticker.strip().upper()
+    if not ticker:
+        return "❌ Ticker girin", _empty_plot("No data"), _empty_plot("No data"), ""
+
+    sig = generate_signal(ticker, portfolio_value, risk_tolerance.lower())
+    portfolio = get_portfolio(portfolio_value)
+    exec_result = portfolio.execute_signal(sig)
+    metrics = portfolio.get_metrics()
+
+    sig_e = {"STRONG_BUY": "🟢🟢", "BUY": "🟢", "HOLD": "🟡", "SELL": "🔴", "STRONG_SELL": "🔴🔴"}.get(sig["signal"], "⚪")
+
+    md = f"## {sig_e} {ticker} — {sig['signal']} (Güven: %{sig['confidence']})\n\n"
+    md += f"**Neden:** {sig.get('reason', 'N/A')}\n\n"
+
+    act = exec_result.get("action", "NONE")
+    if act == "OPENED":
+        md += f"✅ **Pozisyon açıldı:** {exec_result['shares']} hisse @ ${exec_result['price']:,.2f}\n"
+        md += f"Maliyet: ${exec_result['cost']:,.2f} | Kalan nakit: ${exec_result['remaining_cash']:,.2f}\n"
+    elif act == "CLOSED":
+        md += f"🔒 **Pozisyon kapatıldı:** PnL ${exec_result.get('pnl',0):+,.2f} ({exec_result.get('pnl_pct',0):+.1f}%)\n"
+    elif act == "REJECTED":
+        md += f"⚠️ **Reddedildi:** {exec_result.get('reason', 'N/A')}\n"
+    else:
+        md += f"➖ **İşlem yok:** {exec_result.get('reason', sig['signal'])}\n"
+
+    md += _build_portfolio_summary_md(metrics, portfolio)
+
+    port_chart = build_portfolio_equity_chart(portfolio.equity_snapshots)
+    pnl_chart = build_pnl_distribution_chart(portfolio.get_trade_history())
+    dd_chart_html = _build_portfolio_positions_md(portfolio)
+
+    return md, port_chart, pnl_chart, dd_chart_html
+
+
+def get_portfolio_status():
+    """Get current portfolio status."""
+    portfolio = get_portfolio()
+    metrics = portfolio.get_metrics()
+    md = _build_portfolio_summary_md(metrics, portfolio)
+
+    port_chart = build_portfolio_equity_chart(portfolio.equity_snapshots)
+    pnl_chart = build_pnl_distribution_chart(portfolio.get_trade_history())
+    positions_md = _build_portfolio_positions_md(portfolio)
+
+    return md, port_chart, pnl_chart, positions_md
+
+
+def reset_portfolio_ui():
+    """Reset portfolio to initial state."""
+    reset_portfolio(100000)
+    return "✅ Portföy sıfırlandı ($100,000)", _empty_plot("Reset"), _empty_plot("Reset"), "*Portföy sıfırlandı*"
+
+
+def _build_portfolio_summary_md(metrics, portfolio):
+    pnl_e = "🟢" if metrics["total_pnl"] >= 0 else "🔴"
+    md = f"\n---\n### 💼 Portföy Özeti\n\n"
+    md += f"| Metrik | Değer |\n|---|---|\n"
+    md += f"| 💰 Nakit | ${metrics['cash']:,.2f} |\n"
+    md += f"| 📊 Toplam Değer | ${metrics['equity']:,.2f} |\n"
+    md += f"| {pnl_e} P&L | ${metrics['total_pnl']:+,.2f} ({metrics['total_pnl_pct']:+.1f}%) |\n"
+    md += f"| 📈 Açık Pozisyon | {metrics['open_positions']} |\n"
+    md += f"| 🔄 Toplam Trade | {metrics['total_trades']} |\n"
+    md += f"| 🎯 Win Rate | %{metrics['win_rate']} |\n"
+    md += f"| 📉 Max Drawdown | {metrics['max_drawdown_pct']}% |\n"
+    md += f"| 💪 Profit Factor | {metrics['profit_factor']} |\n"
+    return md
+
+
+def _build_portfolio_positions_md(portfolio):
+    positions = portfolio.get_positions_detail()
+    history = portfolio.get_trade_history(20)
+
+    md = "### 📋 Açık Pozisyonlar\n\n"
+    if positions:
+        md += "| Ticker | Adet | Giriş | Maliyet | SL | TP | Sinyal |\n|---|---|---|---|---|---|---|\n"
+        for p in positions:
+            md += f"| **{p['ticker']}** | {p['shares']} | ${p['entry_price']:,.2f} | ${p['cost']:,.2f} | {p.get('stop_loss') or '—'} | {p.get('take_profit') or '—'} | {p.get('signal', '—')} |\n"
+    else:
+        md += "*Açık pozisyon yok.*\n"
+
+    md += "\n### 📜 Son Trade'ler\n\n"
+    if history:
+        md += "| Ticker | Giriş | Çıkış | PnL | PnL% | Neden |\n|---|---|---|---|---|---|\n"
+        for t in history[-10:]:
+            pnl_e = "🟢" if t["pnl"] > 0 else "🔴"
+            md += f"| **{t['ticker']}** | ${t['entry_price']:,.2f} | ${t['exit_price']:,.2f} | {pnl_e} ${t['pnl']:+,.2f} | {t['pnl_pct']:+.1f}% | {t['reason']} |\n"
+    else:
+        md += "*Henüz kapatılmış trade yok.*\n"
+
+    return md
+
+
+
+# ═══════════════════════════════════════════════════════
 # HELPER
 # ═══════════════════════════════════════════════════════
 
@@ -342,17 +675,17 @@ def _empty_plot(message="No data"):
 # GRADIO UI
 # ═══════════════════════════════════════════════════════
 
-HEADER = """# 🤖 Trade Bot Advisor v3.0 — Signal-First Architecture
+HEADER = """# 🤖 Trade Bot Advisor v3.5 — Signal-First + Evaluation + Portfolio
 
 | Bileşen | Rol |
 |---|---|
 | 📊 **Signal Engine** | Kural tabanlı indikatör oyu → sinyal üretir (RSI + SMA crossover + MACD + Bollinger + Volume) |
-| 🧠 **LLM Interpreter** | Sinyali Türkçe/İngilizce yorumlar — **asla sinyal üretmez** |
-| 📈 **Backtester** | Stratejiyi geçmiş veride test eder — Sharpe, drawdown, vs buy&hold |
-| 🛡️ **Volatility Filter** | Extreme volatilitede AL sinyallerini filtreler |
-| 🧾 **Structured Output** | Her sinyal JSON formatında: `{"signal": "BUY", "confidence": 0.62, ...}` |
+| 🤖 **AI Trade Decision** | Sinyal + açıklama + backtest + portföy execution — tam pipeline |
+| 📈 **Evaluation Dashboard** | Son 50 sinyal, başarı oranı, PnL, drawdown — tek ekranda |
+| 💼 **Portfolio Simulation** | Stateful portföy: pozisyon aç/kapat, P&L takibi, trade geçmişi |
+| 🧠 **LLM Interpreter** | Sinyali yorumlar — **asla sinyal üretmez** |
 
-> **LLM = yorumlayıcı**, sinyal motoru = karar verici. Demo her zaman çalışır (sample data fallback).
+> Demo her zaman çalışır (sample data fallback). **LLM = yorumlayıcı**, sinyal motoru = karar verici.
 """
 
 TICKERS_HELP = """**Desteklenen:** 🇺🇸 AAPL, NVDA, MSFT | 🇹🇷 THYAO.IS, GARAN.IS | ₿ BTC-USD, ETH-USD | 🪙 GC=F (Altın)"""
@@ -473,6 +806,78 @@ with gr.Blocks(title="🤖 Trade Bot Advisor v3.0") as demo:
                 outputs=exp_md,
             )
         
+        # ════════════ TAB: AI TRADE DECISION ════════════
+        with gr.Tab("🤖 AI Decision", id="ai_decision"):
+            gr.Markdown("### 🤖 AI Trade Decision Pipeline\nSinyal → Açıklama → Backtest doğrulama → Portföy execution — hepsi tek tuşla.\nVirgülle birden fazla ticker girin.")
+            with gr.Row():
+                with gr.Column(scale=1):
+                    ai_tickers = gr.Textbox(label="📌 Ticker(lar)", value="AAPL, NVDA, MSFT", placeholder="Virgülle ayırın…")
+                    ai_portfolio = gr.Number(label="💰 Portföy ($)", value=100000, minimum=1000)
+                    ai_risk = gr.Radio(label="⚖️ Risk", choices=["Conservative", "Moderate", "Aggressive"], value="Moderate")
+                    ai_btn = gr.Button("🤖 Trade Kararlarını Çalıştır", variant="primary", size="lg")
+                with gr.Column(scale=2):
+                    ai_md = gr.Markdown(value="*Ticker girin ve çalıştırın…*")
+                    ai_chart = gr.Plot(label="💼 Portföy Equity")
+                    ai_json = gr.JSON(label="📋 Detaylı Sonuçlar")
+            ai_btn.click(
+                fn=run_ai_trade_decision,
+                inputs=[ai_tickers, ai_portfolio, ai_risk],
+                outputs=[ai_md, ai_chart, ai_json],
+            )
+
+        # ════════════ TAB: EVALUATION DASHBOARD ════════════
+        with gr.Tab("📊 Evaluation", id="evaluation"):
+            gr.Markdown("### 📊 Evaluation Dashboard — Son 50 sinyal, başarı oranı, PnL, drawdown\nBirden fazla ticker backtest edip birleşik performans görün.")
+            with gr.Row():
+                with gr.Column(scale=1):
+                    eval_tickers = gr.Textbox(label="📌 Ticker(lar)", value="AAPL, NVDA, MSFT, GOOGL, TSLA")
+                    eval_period = gr.Slider(label="📅 Dönem (yıl)", minimum=0.5, maximum=5, step=0.5, value=2)
+                    eval_btn = gr.Button("📊 Dashboard Oluştur", variant="primary", size="lg")
+                with gr.Column(scale=2):
+                    eval_md = gr.Markdown(value="*Ticker girin ve dashboard oluşturun…*")
+            with gr.Row():
+                eval_equity = gr.Plot(label="💰 Birleşik Equity Curve")
+                eval_dd = gr.Plot(label="📉 Drawdown")
+            with gr.Row():
+                eval_dist = gr.Plot(label="📊 Sinyal Dağılımı")
+                eval_json = gr.JSON(label="📋 Detaylı Veriler")
+            eval_btn.click(
+                fn=run_evaluation_dashboard,
+                inputs=[eval_tickers, eval_period],
+                outputs=[eval_md, eval_equity, eval_dd, eval_dist, eval_json],
+            )
+
+        # ════════════ TAB: PORTFOLIO SIMULATION ════════════
+        with gr.Tab("💼 Portföy Sim", id="portfolio"):
+            gr.Markdown("### 💼 Portfolio Simulation — Stateful trade tracking\nHer sinyal portföye işlenir. Pozisyonlar, P&L, drawdown takip edilir.")
+            with gr.Row():
+                with gr.Column(scale=1):
+                    ps_ticker = gr.Textbox(label="📌 Ticker", value="AAPL")
+                    ps_portfolio = gr.Number(label="💰 Portföy ($)", value=100000, minimum=1000)
+                    ps_risk = gr.Radio(label="⚖️ Risk", choices=["Conservative", "Moderate", "Aggressive"], value="Moderate")
+                    ps_trade_btn = gr.Button("📝 Sinyal + Trade Aç", variant="primary", size="lg")
+                    ps_status_btn = gr.Button("📊 Portföy Durumu", variant="secondary")
+                    ps_reset_btn = gr.Button("🗑️ Portföyü Sıfırla", variant="stop")
+                with gr.Column(scale=2):
+                    ps_md = gr.Markdown(value="*Ticker girin ve trade açın…*")
+                    with gr.Row():
+                        ps_equity = gr.Plot(label="💼 Portföy Equity")
+                        ps_pnl = gr.Plot(label="📊 PnL Dağılımı")
+                    ps_positions = gr.Markdown(value="*Portföy boş*")
+            ps_trade_btn.click(
+                fn=run_portfolio_action,
+                inputs=[ps_ticker, ps_portfolio, ps_risk],
+                outputs=[ps_md, ps_equity, ps_pnl, ps_positions],
+            )
+            ps_status_btn.click(
+                fn=get_portfolio_status,
+                outputs=[ps_md, ps_equity, ps_pnl, ps_positions],
+            )
+            ps_reset_btn.click(
+                fn=reset_portfolio_ui,
+                outputs=[ps_md, ps_equity, ps_pnl, ps_positions],
+            )
+
         # ════════════ TAB 5: REHBER ════════════
         with gr.Tab("📖 Rehber"):
             gr.Markdown("""
@@ -561,7 +966,7 @@ Kullanıcı → Ticker girer
 ⚠️ **DISCLAIMER:** Bu sistem eğitim ve araştırma amaçlıdır. Yatırım tavsiyesi değildir.
 """)
     
-    gr.Markdown("---\n**v3.0** | Signal Engine + Backtester + Structured Output + Explainability | ⚠️ Yatırım tavsiyesi değildir")
+    gr.Markdown("---\n**v3.5** | Signal Engine + AI Decision + Evaluation Dashboard + Portfolio Sim + Backtester + Explainability | ⚠️ Yatırım tavsiyesi değildir")
 
 
 if __name__ == "__main__":
