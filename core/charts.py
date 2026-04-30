@@ -69,6 +69,96 @@ def build_candlestick_chart(df, ticker: str, sma20=None, sma50=None):
     
     return fig
 
+def build_portfolio_equity_chart(snapshots: list[dict]):
+    """Build portfolio equity curve from snapshots."""
+    if not snapshots or len(snapshots) < 2:
+        fig = go.Figure()
+        fig.add_annotation(text="Henüz trade yok — önce sinyal çalıştırın", showarrow=False,
+                          font=dict(size=14, color="gray"))
+        fig.update_layout(template="plotly_dark", paper_bgcolor="#1e1e1e", plot_bgcolor="#1e1e1e", height=300)
+        return fig
+
+    equities = [s["equity"] for s in snapshots]
+    initial = equities[0]
+    final = equities[-1]
+    ret = (final - initial) / initial * 100
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        y=equities, mode='lines',
+        line=dict(color="#03DAC6" if final >= initial else "#ef5350", width=2),
+        fill='tozeroy', fillcolor='rgba(3,218,198,0.08)' if final >= initial else 'rgba(239,83,80,0.08)',
+        name="Portföy",
+    ))
+    fig.add_hline(y=initial, line_dash="dash", line_color="gray", opacity=0.4,
+                  annotation_text=f"Başlangıç: ${initial:,.0f}")
+    fig.update_layout(
+        title=f"💼 Portföy Değeri — {ret:+.1f}%",
+        height=300, template="plotly_dark",
+        paper_bgcolor="#1e1e1e", plot_bgcolor="#1e1e1e",
+        font=dict(color="#e0e0e0"), yaxis_title="Değer ($)",
+        margin=dict(l=50, r=20, t=60, b=30),
+    )
+    return fig
+
+
+def build_pnl_distribution_chart(trade_history: list[dict]):
+    """Build PnL distribution histogram."""
+    if not trade_history:
+        fig = go.Figure()
+        fig.add_annotation(text="Henüz kapatılmış trade yok", showarrow=False,
+                          font=dict(size=14, color="gray"))
+        fig.update_layout(template="plotly_dark", paper_bgcolor="#1e1e1e", plot_bgcolor="#1e1e1e", height=300)
+        return fig
+
+    pnls = [t["pnl_pct"] for t in trade_history]
+    colors = ["#26a69a" if p > 0 else "#ef5350" for p in pnls]
+
+    fig = go.Figure(data=[go.Bar(
+        x=[f"{t['ticker']}" for t in trade_history],
+        y=pnls,
+        marker_color=colors,
+        text=[f"{p:+.1f}%" for p in pnls],
+        textposition='outside',
+    )])
+    fig.update_layout(
+        title="📊 Trade PnL Dağılımı",
+        height=300, template="plotly_dark",
+        paper_bgcolor="#1e1e1e", plot_bgcolor="#1e1e1e",
+        font=dict(color="#e0e0e0"), yaxis_title="PnL %",
+        margin=dict(l=50, r=20, t=60, b=30),
+    )
+    return fig
+
+
+def build_drawdown_chart(snapshots: list[dict]):
+    """Build drawdown chart from equity snapshots."""
+    if not snapshots or len(snapshots) < 2:
+        fig = go.Figure()
+        fig.add_annotation(text="Yetersiz veri", showarrow=False, font=dict(size=14, color="gray"))
+        fig.update_layout(template="plotly_dark", paper_bgcolor="#1e1e1e", plot_bgcolor="#1e1e1e", height=250)
+        return fig
+
+    equities = np.array([s["equity"] for s in snapshots])
+    peak = np.maximum.accumulate(equities)
+    drawdown = (equities - peak) / peak * 100
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        y=drawdown, mode='lines', fill='tozeroy',
+        line=dict(color="#ef5350", width=1.5),
+        fillcolor='rgba(239,83,80,0.15)',
+        name="Drawdown",
+    ))
+    fig.update_layout(
+        title=f"📉 Drawdown — Max: {float(np.min(drawdown)):.1f}%",
+        height=250, template="plotly_dark",
+        paper_bgcolor="#1e1e1e", plot_bgcolor="#1e1e1e",
+        font=dict(color="#e0e0e0"), yaxis_title="Drawdown %",
+        margin=dict(l=50, r=20, t=60, b=30),
+    )
+    return fig
+
 
 def build_indicator_panel(df, ticker: str):
     """Build RSI + MACD indicator panel."""
