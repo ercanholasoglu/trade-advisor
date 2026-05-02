@@ -34,6 +34,7 @@ from core.evaluator import run_ground_truth_evaluation
 from core.agents import run_multi_agent_analysis
 from core.optimizer import compute_indicator_accuracy, optimize_for_tickers
 from core.reasoning import generate_advanced_reasoning
+from core.council_ui import run_llm_council_ui
 
 
 # ═══════════════════════════════════════════════════════
@@ -858,6 +859,18 @@ with gr.Blocks(title="🤖 Trade Bot Advisor v3.5") as demo:
                 with gr.Column(scale=2):
                     re_md=gr.Markdown(value="*Girin...*"); re_json=gr.JSON(label="Detay")
             re_btn.click(run_reasoning_ui,[re_t],[re_md,re_json])
+
+        with gr.Tab("🏛️ LLM Council"):
+            gr.Markdown("### 🏛️ Gercek LLM Council — Bull vs Bear Tartismasi\n6 LLM ajan gercek zamanli tartisir, Fund Manager karar verir.\n**HF_TOKEN gerekli. ~30-60 sn surer.**")
+            with gr.Row():
+                with gr.Column(scale=1):
+                    lc_t=gr.Textbox(label="Ticker",value="AAPL")
+                    lc_ctx=gr.Textbox(label="Kontekst (opsiyonel)",placeholder="$100K, moderate risk...")
+                    lc_btn=gr.Button("🏛️ Council Calistir",variant="primary",size="lg")
+                with gr.Column(scale=2):
+                    lc_md=gr.Markdown(value="*HF_TOKEN gerekli. Ticker girin...*")
+                    lc_json=gr.JSON(label="Council JSON")
+            lc_btn.click(run_llm_council_ui,[lc_t,lc_ctx],[lc_md,lc_json])
 
         with gr.Tab("📖 Rehber"):
             gr.Markdown("""# 📖 Rehber
